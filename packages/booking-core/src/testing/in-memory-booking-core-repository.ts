@@ -3,9 +3,12 @@ import { randomUUID } from "node:crypto";
 import type {
   AvailabilityRule,
   Booking,
+  BookingEvent,
+  BookingEventType,
   Customer,
   CustomerContactInput,
   DateRange,
+  NotificationJob,
   Organization,
   Service,
   StaffMember,
@@ -28,6 +31,8 @@ interface SeedData {
   availabilityRules?: AvailabilityRule[];
   timeOffs?: TimeOff[];
   bookings?: Booking[];
+  bookingEvents?: BookingEvent[];
+  notificationJobs?: NotificationJob[];
 }
 
 export class InMemoryBookingCoreRepository
@@ -43,6 +48,8 @@ export class InMemoryBookingCoreRepository
   private readonly availabilityRules = new Map<string, AvailabilityRule>();
   private readonly timeOffs = new Map<string, TimeOff>();
   private readonly bookings = new Map<string, Booking>();
+  private readonly bookingEvents = new Map<string, BookingEvent>();
+  private readonly notificationJobs = new Map<string, NotificationJob>();
 
   constructor(seedData: SeedData = {}) {
     seedData.organizations?.forEach((organization) =>
@@ -60,6 +67,12 @@ export class InMemoryBookingCoreRepository
     );
     seedData.timeOffs?.forEach((timeOff) => this.timeOffs.set(timeOff.id, timeOff));
     seedData.bookings?.forEach((booking) => this.bookings.set(booking.id, booking));
+    seedData.bookingEvents?.forEach((bookingEvent) =>
+      this.bookingEvents.set(bookingEvent.id, bookingEvent),
+    );
+    seedData.notificationJobs?.forEach((notificationJob) =>
+      this.notificationJobs.set(notificationJob.id, notificationJob),
+    );
   }
 
   async getOrganization(organizationId: string): Promise<Organization | null> {
@@ -244,6 +257,19 @@ export class InMemoryBookingCoreRepository
     }
 
     return booking;
+  }
+
+  async getCustomer(
+    organizationId: string,
+    customerId: string,
+  ): Promise<Customer | null> {
+    const customer = this.customers.get(customerId) ?? null;
+
+    if (!customer || customer.organizationId !== organizationId) {
+      return null;
+    }
+
+    return customer;
   }
 
   async findCustomerByContact(
@@ -476,10 +502,63 @@ export class InMemoryBookingCoreRepository
     return updatedBooking;
   }
 
+  async createBookingEvent(input: {
+    organizationId: string;
+    bookingId: string;
+    eventType: BookingEventType;
+    metadata: Record<string, unknown>;
+  }): Promise<BookingEvent> {
+    const bookingEvent: BookingEvent = {
+      id: randomUUID(),
+      organizationId: input.organizationId,
+      bookingId: input.bookingId,
+      eventType: input.eventType,
+      metadata: input.metadata,
+      occurredAt: new Date(),
+    };
+
+    this.bookingEvents.set(bookingEvent.id, bookingEvent);
+    return bookingEvent;
+  }
+
+  async createNotificationJob(input: {
+    organizationId: string;
+    bookingId: string;
+    customerId: string;
+    eventType: BookingEventType;
+    payload: Record<string, unknown>;
+  }): Promise<NotificationJob> {
+    const notificationJob: NotificationJob = {
+      id: randomUUID(),
+      organizationId: input.organizationId,
+      bookingId: input.bookingId,
+      customerId: input.customerId,
+      eventType: input.eventType,
+      status: "pending",
+      payload: input.payload,
+      createdAt: new Date(),
+    };
+
+    this.notificationJobs.set(notificationJob.id, notificationJob);
+    return notificationJob;
+  }
+
   async withTransaction<T>(
     callback: (store: BookingMutationStore) => Promise<T>,
   ): Promise<T> {
     return callback(this);
+  }
+
+  listPersistedBookingEvents(organizationId: string): BookingEvent[] {
+    return [...this.bookingEvents.values()]
+      .filter((bookingEvent) => bookingEvent.organizationId === organizationId)
+      .sort((left, right) => left.occurredAt.getTime() - right.occurredAt.getTime());
+  }
+
+  listPersistedNotificationJobs(organizationId: string): NotificationJob[] {
+    return [...this.notificationJobs.values()]
+      .filter((notificationJob) => notificationJob.organizationId === organizationId)
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
   }
 }
 

@@ -2,6 +2,7 @@ import type { Booking } from "../domain/entities";
 import { NotFoundError, ValidationError } from "../domain/errors";
 import type { BookingRepository } from "../repositories";
 import { assertValidRange, parseDateTime } from "../utils/date-time";
+import { recordBookingLifecycle } from "./booking-lifecycle-support";
 import { resolveBookableSlot } from "./resolve-bookable-slot";
 
 export interface ListBookingsInput {
@@ -75,11 +76,39 @@ export function createBookingManagementService(repository: BookingRepository) {
           return booking;
         }
 
-        return store.updateBookingStatus({
+        const customer = await store.getCustomer(
+          input.organizationId,
+          booking.customerId,
+        );
+
+        if (!customer) {
+          throw new NotFoundError("Customer was not found.");
+        }
+
+        const cancelledBooking = await store.updateBookingStatus({
           organizationId: input.organizationId,
           bookingId: input.bookingId,
           status: "cancelled",
         });
+
+        await recordBookingLifecycle({
+          store,
+          booking: cancelledBooking,
+          customer,
+          eventType: "booking_cancelled",
+          metadata: {
+            startsAt: cancelledBooking.startsAt.toISOString(),
+            endsAt: cancelledBooking.endsAt.toISOString(),
+            staffMemberId: cancelledBooking.staffMemberId,
+          },
+          payload: {
+            bookingId: cancelledBooking.id,
+            customerId: customer.id,
+            eventType: "booking_cancelled",
+          },
+        });
+
+        return cancelledBooking;
       });
     },
 
@@ -97,6 +126,15 @@ export function createBookingManagementService(repository: BookingRepository) {
           throw new ValidationError("Cancelled bookings cannot be rescheduled.");
         }
 
+        const customer = await store.getCustomer(
+          input.organizationId,
+          booking.customerId,
+        );
+
+        if (!customer) {
+          throw new NotFoundError("Customer was not found.");
+        }
+
         const requestedStaffMemberId =
           normalizeOptionalString(input.staffMemberId) ?? booking.staffMemberId;
         const { slot } = await resolveBookableSlot(store, {
@@ -107,13 +145,43 @@ export function createBookingManagementService(repository: BookingRepository) {
           excludeBookingId: booking.id,
         });
 
-        return store.updateBookingSchedule({
+        if (
+          booking.staffMemberId === slot.staffMemberId &&
+          booking.startsAt.getTime() === slot.startsAt.getTime() &&
+          booking.endsAt.getTime() === slot.endsAt.getTime()
+        ) {
+          return booking;
+        }
+
+        const rescheduledBooking = await store.updateBookingSchedule({
           organizationId: input.organizationId,
           bookingId: input.bookingId,
           staffMemberId: slot.staffMemberId,
           startsAt: slot.startsAt,
           endsAt: slot.endsAt,
         });
+
+        await recordBookingLifecycle({
+          store,
+          booking: rescheduledBooking,
+          customer,
+          eventType: "booking_rescheduled",
+          metadata: {
+            previousStartsAt: booking.startsAt.toISOString(),
+            previousEndsAt: booking.endsAt.toISOString(),
+            previousStaffMemberId: booking.staffMemberId,
+            startsAt: rescheduledBooking.startsAt.toISOString(),
+            endsAt: rescheduledBooking.endsAt.toISOString(),
+            staffMemberId: rescheduledBooking.staffMemberId,
+          },
+          payload: {
+            bookingId: rescheduledBooking.id,
+            customerId: customer.id,
+            eventType: "booking_rescheduled",
+          },
+        });
+
+        return rescheduledBooking;
       });
     },
   };

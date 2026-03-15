@@ -178,6 +178,23 @@ async function runConfigurationScenario(): Promise<void> {
     availabilityAfterCancellation.slots[1]?.startsAt.toISOString(),
     "2026-03-16T11:00:00.000Z",
   );
+
+  const bookingEvents = repository.listPersistedBookingEvents(organization.id);
+  const notificationJobs = repository.listPersistedNotificationJobs(
+    organization.id,
+  );
+
+  assert.equal(bookingEvents.length, 3);
+  assert.equal(notificationJobs.length, 3);
+  assert.equal(bookingEvents[0]?.eventType, "booking_created");
+  assert.equal(bookingEvents[1]?.eventType, "booking_rescheduled");
+  assert.equal(bookingEvents[2]?.eventType, "booking_cancelled");
+  assert.equal(notificationJobs[0]?.eventType, "booking_created");
+  assert.equal(notificationJobs[1]?.eventType, "booking_rescheduled");
+  assert.equal(notificationJobs[2]?.eventType, "booking_cancelled");
+  assert.equal(notificationJobs[0]?.status, "pending");
+  assert.equal(notificationJobs[1]?.status, "pending");
+  assert.equal(notificationJobs[2]?.status, "pending");
 }
 
 void main().catch((error: unknown) => {

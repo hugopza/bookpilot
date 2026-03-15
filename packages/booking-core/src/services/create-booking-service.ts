@@ -7,6 +7,7 @@ import type {
 import { ValidationError } from "../domain/errors";
 import type { BookingRepository } from "../repositories";
 import { parseDateTime } from "../utils/date-time";
+import { recordBookingLifecycle } from "./booking-lifecycle-support";
 import { resolveBookableSlot } from "./resolve-bookable-slot";
 
 export interface CreateBookingInput {
@@ -50,6 +51,24 @@ export function createBookingService(repository: BookingRepository) {
           startsAt: slot.startsAt,
           endsAt: slot.endsAt,
           channelOrigin,
+        });
+
+        await recordBookingLifecycle({
+          store,
+          booking,
+          customer,
+          eventType: "booking_created",
+          metadata: {
+            startsAt: booking.startsAt.toISOString(),
+            endsAt: booking.endsAt.toISOString(),
+            staffMemberId: booking.staffMemberId,
+            channelOrigin: booking.channelOrigin,
+          },
+          payload: {
+            bookingId: booking.id,
+            customerId: customer.id,
+            eventType: "booking_created",
+          },
         });
 
         return { booking, customer };

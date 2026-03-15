@@ -1,5 +1,12 @@
 export type BookingStatus = "confirmed" | "cancelled";
 
+export type BookingEventType =
+  | "booking_created"
+  | "booking_cancelled"
+  | "booking_rescheduled";
+
+export type NotificationJobStatus = "pending";
+
 export type BookingChannelOrigin =
   | "api"
   | "web"
@@ -67,6 +74,26 @@ export interface Booking {
   endsAt: Date;
   status: BookingStatus;
   channelOrigin: BookingChannelOrigin;
+  createdAt: Date;
+}
+
+export interface BookingEvent {
+  id: string;
+  organizationId: string;
+  bookingId: string;
+  eventType: BookingEventType;
+  metadata: Record<string, unknown>;
+  occurredAt: Date;
+}
+
+export interface NotificationJob {
+  id: string;
+  organizationId: string;
+  bookingId: string;
+  customerId: string;
+  eventType: BookingEventType;
+  status: NotificationJobStatus;
+  payload: Record<string, unknown>;
   createdAt: Date;
 }
 

@@ -3,6 +3,7 @@ export * from "./domain/errors";
 export * from "./repositories";
 export * from "./services/availability-service";
 export * from "./services/booking-management-service";
+export * from "./services/booking-lifecycle-support";
 export * from "./services/configuration-service";
 export * from "./services/create-booking-service";
 export * from "./services/resolve-bookable-slot";

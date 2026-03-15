@@ -1,10 +1,13 @@
 import type {
   AvailabilityRule,
   Booking,
+  BookingEvent,
+  BookingEventType,
   BookingChannelOrigin,
   Customer,
   CustomerContactInput,
   DateRange,
+  NotificationJob,
   Organization,
   Service,
   StaffMember,
@@ -44,6 +47,10 @@ export interface BookingMutationStore extends AvailabilityRepository {
     organizationId: string,
     bookingId: string,
   ): Promise<Booking | null>;
+  getCustomer(
+    organizationId: string,
+    customerId: string,
+  ): Promise<Customer | null>;
   findCustomerByContact(
     organizationId: string,
     contact: CustomerContactInput,
@@ -73,6 +80,19 @@ export interface BookingMutationStore extends AvailabilityRepository {
     startsAt: Date;
     endsAt: Date;
   }): Promise<Booking>;
+  createBookingEvent(input: {
+    organizationId: string;
+    bookingId: string;
+    eventType: BookingEventType;
+    metadata: Record<string, unknown>;
+  }): Promise<BookingEvent>;
+  createNotificationJob(input: {
+    organizationId: string;
+    bookingId: string;
+    customerId: string;
+    eventType: BookingEventType;
+    payload: Record<string, unknown>;
+  }): Promise<NotificationJob>;
 }
 
 export interface BookingRepository extends AvailabilityRepository {

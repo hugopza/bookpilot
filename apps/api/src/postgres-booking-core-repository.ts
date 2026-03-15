@@ -4,12 +4,15 @@ import {
   ConflictError,
   type AvailabilityRule,
   type Booking,
+  type BookingEvent,
+  type BookingEventType,
   type BookingMutationStore,
   type BookingRepository,
   type ConfigurationRepository,
   type Customer,
   type CustomerContactInput,
   type DateRange,
+  type NotificationJob,
   type Organization,
   type Service,
   type StaffMember,
@@ -539,6 +542,13 @@ class TransactionalPostgresBookingCoreStore implements BookingMutationStore {
     return this.reader.getBooking(organizationId, bookingId);
   }
 
+  async getCustomer(
+    organizationId: string,
+    customerId: string,
+  ): Promise<Customer | null> {
+    return this.reader.getCustomer(organizationId, customerId);
+  }
+
   async findCustomerByContact(
     organizationId: string,
     contact: CustomerContactInput,
@@ -718,6 +728,80 @@ class TransactionalPostgresBookingCoreStore implements BookingMutationStore {
       throw error;
     }
   }
+
+  async createBookingEvent(input: {
+    organizationId: string;
+    bookingId: string;
+    eventType: BookingEventType;
+    metadata: Record<string, unknown>;
+  }): Promise<BookingEvent> {
+    const result = await this.runner.query<BookingEventRow>(
+      `
+        insert into booking_events (
+          organization_id,
+          booking_id,
+          event_type,
+          metadata
+        )
+        values ($1, $2, $3, $4::jsonb)
+        returning
+          id,
+          organization_id,
+          booking_id,
+          event_type,
+          metadata,
+          occurred_at
+      `,
+      [
+        input.organizationId,
+        input.bookingId,
+        input.eventType,
+        JSON.stringify(input.metadata),
+      ],
+    );
+
+    return mapBookingEvent(result.rows[0]);
+  }
+
+  async createNotificationJob(input: {
+    organizationId: string;
+    bookingId: string;
+    customerId: string;
+    eventType: BookingEventType;
+    payload: Record<string, unknown>;
+  }): Promise<NotificationJob> {
+    const result = await this.runner.query<NotificationJobRow>(
+      `
+        insert into notification_jobs (
+          organization_id,
+          booking_id,
+          customer_id,
+          event_type,
+          status,
+          payload
+        )
+        values ($1, $2, $3, $4, 'pending', $5::jsonb)
+        returning
+          id,
+          organization_id,
+          booking_id,
+          customer_id,
+          event_type,
+          status,
+          payload,
+          created_at
+      `,
+      [
+        input.organizationId,
+        input.bookingId,
+        input.customerId,
+        input.eventType,
+        JSON.stringify(input.payload),
+      ],
+    );
+
+    return mapNotificationJob(result.rows[0]);
+  }
 }
 
 class QueryRunnerBackedRepository {
@@ -896,6 +980,23 @@ class QueryRunnerBackedRepository {
 
     return result.rows[0] ? mapBooking(result.rows[0]) : null;
   }
+
+  async getCustomer(
+    organizationId: string,
+    customerId: string,
+  ): Promise<Customer | null> {
+    const result = await this.runner.query<CustomerRow>(
+      `
+        select id, organization_id, full_name, phone, email
+        from customers
+        where organization_id = $1
+          and id = $2
+      `,
+      [organizationId, customerId],
+    );
+
+    return result.rows[0] ? mapCustomer(result.rows[0]) : null;
+  }
 }
 
 interface OrganizationRow {
@@ -958,6 +1059,26 @@ interface BookingRow {
   ends_at: Date | string;
   status: Booking["status"];
   channel_origin: Booking["channelOrigin"];
+  created_at: Date | string;
+}
+
+interface BookingEventRow {
+  id: string;
+  organization_id: string;
+  booking_id: string;
+  event_type: BookingEventType;
+  metadata: Record<string, unknown> | string;
+  occurred_at: Date | string;
+}
+
+interface NotificationJobRow {
+  id: string;
+  organization_id: string;
+  booking_id: string;
+  customer_id: string;
+  event_type: BookingEventType;
+  status: NotificationJob["status"];
+  payload: Record<string, unknown> | string;
   created_at: Date | string;
 }
 
@@ -1038,8 +1159,41 @@ function mapBooking(row: BookingRow): Booking {
   };
 }
 
+function mapBookingEvent(row: BookingEventRow): BookingEvent {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    bookingId: row.booking_id,
+    eventType: row.event_type,
+    metadata: toRecord(row.metadata),
+    occurredAt: toDate(row.occurred_at),
+  };
+}
+
+function mapNotificationJob(row: NotificationJobRow): NotificationJob {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    bookingId: row.booking_id,
+    customerId: row.customer_id,
+    eventType: row.event_type,
+    status: row.status,
+    payload: toRecord(row.payload),
+    createdAt: toDate(row.created_at),
+  };
+}
+
 function toDate(value: Date | string): Date {
   return value instanceof Date ? value : new Date(value);
+}
+
+function toRecord(value: Record<string, unknown> | string): Record<string, unknown> {
+  if (typeof value === "string") {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    return parsed;
+  }
+
+  return value;
 }
 
 function isExclusionViolation(error: unknown): boolean {
