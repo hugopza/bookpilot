@@ -6,6 +6,7 @@ import {
   type Booking,
   type BookingMutationStore,
   type BookingRepository,
+  type ConfigurationRepository,
   type Customer,
   type CustomerContactInput,
   type DateRange,
@@ -22,8 +23,22 @@ interface QueryRunner {
   ): Promise<{ rows: T[] }>;
 }
 
-export class PostgresBookingCoreRepository implements BookingRepository {
+export class PostgresBookingCoreRepository
+  implements BookingRepository, ConfigurationRepository
+{
   constructor(private readonly pool: Pool) {}
+
+  async listOrganizations(): Promise<Organization[]> {
+    const result = await this.pool.query<OrganizationRow>(
+      `
+        select id, name, slug, time_zone
+        from organizations
+        order by name asc
+      `,
+    );
+
+    return result.rows.map(mapOrganization);
+  }
 
   async getOrganization(organizationId: string): Promise<Organization | null> {
     const result = await this.pool.query<OrganizationRow>(
@@ -56,6 +71,20 @@ export class PostgresBookingCoreRepository implements BookingRepository {
     return result.rows[0] ? mapService(result.rows[0]) : null;
   }
 
+  async listServices(organizationId: string): Promise<Service[]> {
+    const result = await this.pool.query<ServiceRow>(
+      `
+        select id, organization_id, name, description, duration_minutes, active
+        from services
+        where organization_id = $1
+        order by name asc
+      `,
+      [organizationId],
+    );
+
+    return result.rows.map(mapService);
+  }
+
   async listActiveStaffMembers(
     organizationId: string,
     staffMemberId?: string,
@@ -69,6 +98,37 @@ export class PostgresBookingCoreRepository implements BookingRepository {
           and ($2::uuid is null or id = $2::uuid)
       `,
       [organizationId, staffMemberId ?? null],
+    );
+
+    return result.rows.map(mapStaffMember);
+  }
+
+  async getStaffMember(
+    organizationId: string,
+    staffMemberId: string,
+  ): Promise<StaffMember | null> {
+    const result = await this.pool.query<StaffMemberRow>(
+      `
+        select id, organization_id, full_name, active
+        from staff_members
+        where organization_id = $1
+          and id = $2
+      `,
+      [organizationId, staffMemberId],
+    );
+
+    return result.rows[0] ? mapStaffMember(result.rows[0]) : null;
+  }
+
+  async listStaffMembers(organizationId: string): Promise<StaffMember[]> {
+    const result = await this.pool.query<StaffMemberRow>(
+      `
+        select id, organization_id, full_name, active
+        from staff_members
+        where organization_id = $1
+        order by full_name asc
+      `,
+      [organizationId],
     );
 
     return result.rows.map(mapStaffMember);
@@ -98,6 +158,22 @@ export class PostgresBookingCoreRepository implements BookingRepository {
     return result.rows.map(mapAvailabilityRule);
   }
 
+  async listConfigurationAvailabilityRules(
+    organizationId: string,
+  ): Promise<AvailabilityRule[]> {
+    const result = await this.pool.query<AvailabilityRuleRow>(
+      `
+        select id, organization_id, staff_member_id, day_of_week, start_time, end_time, is_active
+        from availability_rules
+        where organization_id = $1
+        order by day_of_week asc, start_time asc, id asc
+      `,
+      [organizationId],
+    );
+
+    return result.rows.map(mapAvailabilityRule);
+  }
+
   async listTimeOffs(
     organizationId: string,
     staffMemberIds: string[],
@@ -122,6 +198,20 @@ export class PostgresBookingCoreRepository implements BookingRepository {
         range.startsAt.toISOString(),
         range.endsAt.toISOString(),
       ],
+    );
+
+    return result.rows.map(mapTimeOff);
+  }
+
+  async listConfigurationTimeOffs(organizationId: string): Promise<TimeOff[]> {
+    const result = await this.pool.query<TimeOffRow>(
+      `
+        select id, organization_id, staff_member_id, starts_at, ends_at, reason
+        from time_off
+        where organization_id = $1
+        order by starts_at asc, id asc
+      `,
+      [organizationId],
     );
 
     return result.rows.map(mapTimeOff);
@@ -165,6 +255,151 @@ export class PostgresBookingCoreRepository implements BookingRepository {
     );
 
     return result.rows.map(mapBooking);
+  }
+
+  async createOrganization(input: {
+    name: string;
+    slug: string;
+    timeZone: string;
+  }): Promise<Organization> {
+    try {
+      const result = await this.pool.query<OrganizationRow>(
+        `
+          insert into organizations (name, slug, time_zone)
+          values ($1, $2, $3)
+          returning id, name, slug, time_zone
+        `,
+        [input.name, input.slug, input.timeZone],
+      );
+
+      return mapOrganization(result.rows[0]);
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new ConflictError("Organization slug already exists.");
+      }
+
+      throw error;
+    }
+  }
+
+  async createService(input: {
+    organizationId: string;
+    name: string;
+    description: string | null;
+    durationMinutes: number;
+    active: boolean;
+  }): Promise<Service> {
+    const result = await this.pool.query<ServiceRow>(
+      `
+        insert into services (
+          organization_id,
+          name,
+          description,
+          duration_minutes,
+          active
+        )
+        values ($1, $2, $3, $4, $5)
+        returning id, organization_id, name, description, duration_minutes, active
+      `,
+      [
+        input.organizationId,
+        input.name,
+        input.description,
+        input.durationMinutes,
+        input.active,
+      ],
+    );
+
+    return mapService(result.rows[0]);
+  }
+
+  async createStaffMember(input: {
+    organizationId: string;
+    fullName: string;
+    active: boolean;
+  }): Promise<StaffMember> {
+    const result = await this.pool.query<StaffMemberRow>(
+      `
+        insert into staff_members (organization_id, full_name, active)
+        values ($1, $2, $3)
+        returning id, organization_id, full_name, active
+      `,
+      [input.organizationId, input.fullName, input.active],
+    );
+
+    return mapStaffMember(result.rows[0]);
+  }
+
+  async createAvailabilityRule(input: {
+    organizationId: string;
+    staffMemberId: string | null;
+    dayOfWeek: number;
+    startTime: string;
+    endTime: string;
+    isActive: boolean;
+  }): Promise<AvailabilityRule> {
+    const result = await this.pool.query<AvailabilityRuleRow>(
+      `
+        insert into availability_rules (
+          organization_id,
+          staff_member_id,
+          day_of_week,
+          start_time,
+          end_time,
+          is_active
+        )
+        values ($1, $2, $3, $4, $5, $6)
+        returning
+          id,
+          organization_id,
+          staff_member_id,
+          day_of_week,
+          start_time,
+          end_time,
+          is_active
+      `,
+      [
+        input.organizationId,
+        input.staffMemberId,
+        input.dayOfWeek,
+        input.startTime,
+        input.endTime,
+        input.isActive,
+      ],
+    );
+
+    return mapAvailabilityRule(result.rows[0]);
+  }
+
+  async createTimeOff(input: {
+    organizationId: string;
+    staffMemberId: string | null;
+    startsAt: Date;
+    endsAt: Date;
+    reason: string | null;
+  }): Promise<TimeOff> {
+    const result = await this.pool.query<TimeOffRow>(
+      `
+        insert into time_off (
+          organization_id,
+          staff_member_id,
+          starts_at,
+          ends_at,
+          reason
+        )
+        values ($1, $2, $3, $4, $5)
+        returning id, organization_id, staff_member_id, starts_at, ends_at, reason
+      `,
+      [
+        input.organizationId,
+        input.staffMemberId,
+        input.startsAt.toISOString(),
+        input.endsAt.toISOString(),
+        input.reason,
+      ],
+    );
+
+    return mapTimeOff(result.rows[0]);
   }
 
   async withTransaction<T>(
@@ -640,5 +875,14 @@ function isExclusionViolation(error: unknown): boolean {
     error !== null &&
     "code" in error &&
     error.code === "23P01"
+  );
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "23505"
   );
 }

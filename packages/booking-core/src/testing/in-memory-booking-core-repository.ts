@@ -16,6 +16,7 @@ import type {
   AvailabilityRepository,
   BookingMutationStore,
   BookingRepository,
+  ConfigurationRepository,
 } from "../repositories";
 import { overlaps } from "../utils/date-time";
 
@@ -30,7 +31,10 @@ interface SeedData {
 }
 
 export class InMemoryBookingCoreRepository
-  implements BookingRepository, BookingMutationStore
+  implements
+    BookingRepository,
+    BookingMutationStore,
+    ConfigurationRepository
 {
   private readonly organizations = new Map<string, Organization>();
   private readonly services = new Map<string, Service>();
@@ -62,6 +66,12 @@ export class InMemoryBookingCoreRepository
     return this.organizations.get(organizationId) ?? null;
   }
 
+  async listOrganizations(): Promise<Organization[]> {
+    return [...this.organizations.values()].sort((left, right) =>
+      left.name.localeCompare(right.name),
+    );
+  }
+
   async getActiveService(
     organizationId: string,
     serviceId: string,
@@ -75,6 +85,12 @@ export class InMemoryBookingCoreRepository
     return service;
   }
 
+  async listServices(organizationId: string): Promise<Service[]> {
+    return [...this.services.values()]
+      .filter((service) => service.organizationId === organizationId)
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
   async listActiveStaffMembers(
     organizationId: string,
     staffMemberId?: string,
@@ -85,6 +101,25 @@ export class InMemoryBookingCoreRepository
         staffMember.active &&
         (staffMemberId === undefined || staffMember.id === staffMemberId),
     );
+  }
+
+  async getStaffMember(
+    organizationId: string,
+    staffMemberId: string,
+  ): Promise<StaffMember | null> {
+    const staffMember = this.staffMembers.get(staffMemberId) ?? null;
+
+    if (!staffMember || staffMember.organizationId !== organizationId) {
+      return null;
+    }
+
+    return staffMember;
+  }
+
+  async listStaffMembers(organizationId: string): Promise<StaffMember[]> {
+    return [...this.staffMembers.values()]
+      .filter((staffMember) => staffMember.organizationId === organizationId)
+      .sort((left, right) => left.fullName.localeCompare(right.fullName));
   }
 
   async listAvailabilityRules(
@@ -118,6 +153,23 @@ export class InMemoryBookingCoreRepository
           range.endsAt,
         ),
     );
+  }
+
+  async listConfigurationAvailabilityRules(
+    organizationId: string,
+  ): Promise<AvailabilityRule[]> {
+    return [...this.availabilityRules.values()]
+      .filter((rule) => rule.organizationId === organizationId)
+      .sort((left, right) =>
+        left.dayOfWeek - right.dayOfWeek ||
+        left.startTime.localeCompare(right.startTime),
+      );
+  }
+
+  async listConfigurationTimeOffs(organizationId: string): Promise<TimeOff[]> {
+    return [...this.timeOffs.values()]
+      .filter((timeOff) => timeOff.organizationId === organizationId)
+      .sort((left, right) => left.startsAt.getTime() - right.startsAt.getTime());
   }
 
   async listBookings(
@@ -166,6 +218,100 @@ export class InMemoryBookingCoreRepository
     this.customers.set(customer.id, customer);
 
     return customer;
+  }
+
+  async createOrganization(input: {
+    name: string;
+    slug: string;
+    timeZone: string;
+  }): Promise<Organization> {
+    const organization: Organization = {
+      id: randomUUID(),
+      name: input.name,
+      slug: input.slug,
+      timeZone: input.timeZone,
+    };
+
+    this.organizations.set(organization.id, organization);
+    return organization;
+  }
+
+  async createService(input: {
+    organizationId: string;
+    name: string;
+    description: string | null;
+    durationMinutes: number;
+    active: boolean;
+  }): Promise<Service> {
+    const service: Service = {
+      id: randomUUID(),
+      organizationId: input.organizationId,
+      name: input.name,
+      description: input.description,
+      durationMinutes: input.durationMinutes,
+      active: input.active,
+    };
+
+    this.services.set(service.id, service);
+    return service;
+  }
+
+  async createStaffMember(input: {
+    organizationId: string;
+    fullName: string;
+    active: boolean;
+  }): Promise<StaffMember> {
+    const staffMember: StaffMember = {
+      id: randomUUID(),
+      organizationId: input.organizationId,
+      fullName: input.fullName,
+      active: input.active,
+    };
+
+    this.staffMembers.set(staffMember.id, staffMember);
+    return staffMember;
+  }
+
+  async createAvailabilityRule(input: {
+    organizationId: string;
+    staffMemberId: string | null;
+    dayOfWeek: number;
+    startTime: string;
+    endTime: string;
+    isActive: boolean;
+  }): Promise<AvailabilityRule> {
+    const rule: AvailabilityRule = {
+      id: randomUUID(),
+      organizationId: input.organizationId,
+      staffMemberId: input.staffMemberId,
+      dayOfWeek: input.dayOfWeek,
+      startTime: input.startTime,
+      endTime: input.endTime,
+      isActive: input.isActive,
+    };
+
+    this.availabilityRules.set(rule.id, rule);
+    return rule;
+  }
+
+  async createTimeOff(input: {
+    organizationId: string;
+    staffMemberId: string | null;
+    startsAt: Date;
+    endsAt: Date;
+    reason: string | null;
+  }): Promise<TimeOff> {
+    const timeOff: TimeOff = {
+      id: randomUUID(),
+      organizationId: input.organizationId,
+      staffMemberId: input.staffMemberId,
+      startsAt: input.startsAt,
+      endsAt: input.endsAt,
+      reason: input.reason,
+    };
+
+    this.timeOffs.set(timeOff.id, timeOff);
+    return timeOff;
   }
 
   async createBooking(input: {

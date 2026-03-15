@@ -63,3 +63,50 @@ export interface BookingRepository extends AvailabilityRepository {
     callback: (store: BookingMutationStore) => Promise<T>,
   ): Promise<T>;
 }
+
+export interface ConfigurationRepository
+  extends Pick<AvailabilityRepository, "getOrganization"> {
+  listOrganizations(): Promise<Organization[]>;
+  createOrganization(input: {
+    name: string;
+    slug: string;
+    timeZone: string;
+  }): Promise<Organization>;
+  listServices(organizationId: string): Promise<Service[]>;
+  createService(input: {
+    organizationId: string;
+    name: string;
+    description: string | null;
+    durationMinutes: number;
+    active: boolean;
+  }): Promise<Service>;
+  getStaffMember(
+    organizationId: string,
+    staffMemberId: string,
+  ): Promise<StaffMember | null>;
+  listStaffMembers(organizationId: string): Promise<StaffMember[]>;
+  createStaffMember(input: {
+    organizationId: string;
+    fullName: string;
+    active: boolean;
+  }): Promise<StaffMember>;
+  listConfigurationAvailabilityRules(
+    organizationId: string,
+  ): Promise<AvailabilityRule[]>;
+  createAvailabilityRule(input: {
+    organizationId: string;
+    staffMemberId: string | null;
+    dayOfWeek: number;
+    startTime: string;
+    endTime: string;
+    isActive: boolean;
+  }): Promise<AvailabilityRule>;
+  listConfigurationTimeOffs(organizationId: string): Promise<TimeOff[]>;
+  createTimeOff(input: {
+    organizationId: string;
+    staffMemberId: string | null;
+    startsAt: Date;
+    endsAt: Date;
+    reason: string | null;
+  }): Promise<TimeOff>;
+}

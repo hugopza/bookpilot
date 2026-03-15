@@ -3,7 +3,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import {
   type AvailabilityLookupInput,
   ConflictError,
+  createAvailabilityRuleConfigurationService,
   type CreateBookingInput,
+  createOrganizationConfigurationService,
+  createServiceConfigurationService,
+  createStaffMemberConfigurationService,
+  createTimeOffConfigurationService,
   DomainError,
   NotFoundError,
   ValidationError,
@@ -28,16 +33,41 @@ const repository = new PostgresBookingCoreRepository(
 
 const availabilityService = createAvailabilityService(repository);
 const bookingService = createBookingService(repository);
+const organizationConfigurationService =
+  createOrganizationConfigurationService(repository);
+const serviceConfigurationService = createServiceConfigurationService(repository);
+const staffMemberConfigurationService =
+  createStaffMemberConfigurationService(repository);
+const availabilityRuleConfigurationService =
+  createAvailabilityRuleConfigurationService(repository);
+const timeOffConfigurationService = createTimeOffConfigurationService(repository);
 const port = Number(process.env.PORT ?? "3001");
 
 const server = createServer(async (request, response) => {
   try {
-    if (request.method === "GET" && request.url === "/health") {
+    const pathname = getPathname(request);
+
+    if (request.method === "GET" && pathname === "/health") {
       writeJson(response, 200, { status: "ok" });
       return;
     }
 
-    if (request.method === "POST" && request.url === "/availability/search") {
+    if (request.method === "GET" && pathname === "/organizations") {
+      const result = await organizationConfigurationService.list();
+      writeJson(response, 200, result);
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/organizations") {
+      const payload = await readJsonBody(request);
+      const result = await organizationConfigurationService.create(
+        asCreateOrganizationInput(payload),
+      );
+      writeJson(response, 201, result);
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/availability/search") {
       const payload = await readJsonBody(request);
       const result = await availabilityService.lookup(
         asAvailabilityLookupInput(payload),
@@ -51,6 +81,74 @@ const server = createServer(async (request, response) => {
       const result = await bookingService.create(asCreateBookingInput(payload));
       writeJson(response, 201, result);
       return;
+    }
+
+    const organizationResource = matchOrganizationResource(pathname);
+
+    if (organizationResource) {
+      const { organizationId, resource } = organizationResource;
+
+      if (request.method === "GET" && resource === "services") {
+        const result = await serviceConfigurationService.list(organizationId);
+        writeJson(response, 200, result);
+        return;
+      }
+
+      if (request.method === "POST" && resource === "services") {
+        const payload = await readJsonBody(request);
+        const result = await serviceConfigurationService.create(
+          asCreateServiceConfigurationInput(payload, organizationId),
+        );
+        writeJson(response, 201, result);
+        return;
+      }
+
+      if (request.method === "GET" && resource === "staff-members") {
+        const result = await staffMemberConfigurationService.list(organizationId);
+        writeJson(response, 200, result);
+        return;
+      }
+
+      if (request.method === "POST" && resource === "staff-members") {
+        const payload = await readJsonBody(request);
+        const result = await staffMemberConfigurationService.create(
+          asCreateStaffMemberConfigurationInput(payload, organizationId),
+        );
+        writeJson(response, 201, result);
+        return;
+      }
+
+      if (request.method === "GET" && resource === "availability-rules") {
+        const result = await availabilityRuleConfigurationService.list(
+          organizationId,
+        );
+        writeJson(response, 200, result);
+        return;
+      }
+
+      if (request.method === "POST" && resource === "availability-rules") {
+        const payload = await readJsonBody(request);
+        const result = await availabilityRuleConfigurationService.create(
+          asCreateAvailabilityRuleConfigurationInput(payload, organizationId),
+        );
+        writeJson(response, 201, result);
+        return;
+      }
+
+      if (request.method === "GET" && resource === "time-off") {
+        const result = await timeOffConfigurationService.list(organizationId);
+        writeJson(response, 200, result);
+        return;
+      }
+
+      if (request.method === "POST" && resource === "time-off") {
+        const payload = await readJsonBody(request);
+        const result = await timeOffConfigurationService.create(
+          asCreateTimeOffConfigurationInput(payload, organizationId),
+        );
+        writeJson(response, 201, result);
+        return;
+      }
     }
 
     writeJson(response, 404, { error: "Not found" });
@@ -149,6 +247,102 @@ function asCreateBookingInput(value: unknown): CreateBookingInput {
   };
 }
 
+function asCreateOrganizationInput(value: unknown): {
+  name: string;
+  slug: string;
+  timeZone?: string;
+} {
+  const record = asRecord(value);
+
+  return {
+    name: readRequiredString(record, "name"),
+    slug: readRequiredString(record, "slug"),
+    timeZone: readOptionalString(record, "timeZone"),
+  };
+}
+
+function asCreateServiceConfigurationInput(
+  value: unknown,
+  organizationId: string,
+): {
+  organizationId: string;
+  name: string;
+  description?: string;
+  durationMinutes: number;
+  active?: boolean;
+} {
+  const record = asRecord(value);
+
+  return {
+    organizationId,
+    name: readRequiredString(record, "name"),
+    description: readOptionalString(record, "description"),
+    durationMinutes: readRequiredNumber(record, "durationMinutes"),
+    active: readOptionalBoolean(record, "active"),
+  };
+}
+
+function asCreateStaffMemberConfigurationInput(
+  value: unknown,
+  organizationId: string,
+): {
+  organizationId: string;
+  fullName: string;
+  active?: boolean;
+} {
+  const record = asRecord(value);
+
+  return {
+    organizationId,
+    fullName: readRequiredString(record, "fullName"),
+    active: readOptionalBoolean(record, "active"),
+  };
+}
+
+function asCreateAvailabilityRuleConfigurationInput(
+  value: unknown,
+  organizationId: string,
+): {
+  organizationId: string;
+  staffMemberId?: string;
+  dayOfWeek: number;
+  startTime: string;
+  endTime: string;
+  isActive?: boolean;
+} {
+  const record = asRecord(value);
+
+  return {
+    organizationId,
+    staffMemberId: readOptionalString(record, "staffMemberId"),
+    dayOfWeek: readRequiredNumber(record, "dayOfWeek"),
+    startTime: readRequiredString(record, "startTime"),
+    endTime: readRequiredString(record, "endTime"),
+    isActive: readOptionalBoolean(record, "isActive"),
+  };
+}
+
+function asCreateTimeOffConfigurationInput(
+  value: unknown,
+  organizationId: string,
+): {
+  organizationId: string;
+  staffMemberId?: string;
+  startsAt: string;
+  endsAt: string;
+  reason?: string;
+} {
+  const record = asRecord(value);
+
+  return {
+    organizationId,
+    staffMemberId: readOptionalString(record, "staffMemberId"),
+    startsAt: readRequiredString(record, "startsAt"),
+    endsAt: readRequiredString(record, "endsAt"),
+    reason: readOptionalString(record, "reason"),
+  };
+}
+
 function asRecord(
   value: unknown,
   fieldName = "request body",
@@ -207,6 +401,36 @@ function readOptionalNumber(
   return value;
 }
 
+function readRequiredNumber(
+  record: Record<string, unknown>,
+  fieldName: string,
+): number {
+  const value = record[fieldName];
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new ValidationError(`${fieldName} must be a finite number.`);
+  }
+
+  return value;
+}
+
+function readOptionalBoolean(
+  record: Record<string, unknown>,
+  fieldName: string,
+): boolean | undefined {
+  const value = record[fieldName];
+
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value !== "boolean") {
+    throw new ValidationError(`${fieldName} must be a boolean when provided.`);
+  }
+
+  return value;
+}
+
 function readOptionalChannelOrigin(
   value: unknown,
 ): CreateBookingInput["channelOrigin"] {
@@ -225,4 +449,23 @@ function readOptionalChannelOrigin(
   }
 
   throw new ValidationError("channelOrigin is invalid.");
+}
+
+function getPathname(request: IncomingMessage): string {
+  return new URL(request.url ?? "/", "http://localhost").pathname;
+}
+
+function matchOrganizationResource(
+  pathname: string,
+): { organizationId: string; resource: string } | null {
+  const segments = pathname.split("/").filter(Boolean);
+
+  if (segments.length !== 3 || segments[0] !== "organizations") {
+    return null;
+  }
+
+  return {
+    organizationId: segments[1] ?? "",
+    resource: segments[2] ?? "",
+  };
 }

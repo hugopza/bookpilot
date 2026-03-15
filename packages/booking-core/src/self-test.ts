@@ -2,155 +2,117 @@ import assert from "node:assert/strict";
 
 import { ConflictError } from "./domain/errors";
 import { createAvailabilityService } from "./services/availability-service";
+import {
+  createAvailabilityRuleConfigurationService,
+  createOrganizationConfigurationService,
+  createServiceConfigurationService,
+  createStaffMemberConfigurationService,
+  createTimeOffConfigurationService,
+} from "./services/configuration-service";
 import { createBookingService } from "./services/create-booking-service";
 import { InMemoryBookingCoreRepository } from "./testing/in-memory-booking-core-repository";
 
 async function main(): Promise<void> {
-  await runAvailabilityScenario();
-  await runBookingScenario();
+  await runConfigurationScenario();
   console.log("booking-core self-test passed");
 }
 
-async function runAvailabilityScenario(): Promise<void> {
-  const repository = new InMemoryBookingCoreRepository({
-    organizations: [
-      {
-        id: "org-1",
-        name: "BookPilot Clinic",
-        slug: "bookpilot-clinic",
-        timeZone: "UTC",
-      },
-    ],
-    services: [
-      {
-        id: "service-1",
-        organizationId: "org-1",
-        name: "Initial Consultation",
-        description: null,
-        durationMinutes: 60,
-        active: true,
-      },
-    ],
-    staffMembers: [
-      {
-        id: "staff-1",
-        organizationId: "org-1",
-        fullName: "Alex Doe",
-        active: true,
-      },
-    ],
-    availabilityRules: [
-      {
-        id: "rule-1",
-        organizationId: "org-1",
-        staffMemberId: "staff-1",
-        dayOfWeek: 1,
-        startTime: "09:00:00",
-        endTime: "12:00:00",
-        isActive: true,
-      },
-    ],
-    timeOffs: [
-      {
-        id: "time-off-1",
-        organizationId: "org-1",
-        staffMemberId: "staff-1",
-        startsAt: new Date("2026-03-16T10:00:00.000Z"),
-        endsAt: new Date("2026-03-16T11:00:00.000Z"),
-        reason: "Break",
-      },
-    ],
-    bookings: [
-      {
-        id: "booking-1",
-        organizationId: "org-1",
-        serviceId: "service-1",
-        customerId: "customer-1",
-        staffMemberId: "staff-1",
-        startsAt: new Date("2026-03-16T11:00:00.000Z"),
-        endsAt: new Date("2026-03-16T12:00:00.000Z"),
-        status: "confirmed",
-        channelOrigin: "api",
-        createdAt: new Date("2026-03-15T10:00:00.000Z"),
-      },
-    ],
-  });
-  const service = createAvailabilityService(repository);
+async function runConfigurationScenario(): Promise<void> {
+  const repository = new InMemoryBookingCoreRepository();
+  const organizationConfigurationService =
+    createOrganizationConfigurationService(repository);
+  const serviceConfigurationService =
+    createServiceConfigurationService(repository);
+  const staffMemberConfigurationService =
+    createStaffMemberConfigurationService(repository);
+  const availabilityRuleConfigurationService =
+    createAvailabilityRuleConfigurationService(repository);
+  const timeOffConfigurationService = createTimeOffConfigurationService(repository);
+  const bookingService = createBookingService(repository);
+  const availabilityService = createAvailabilityService(repository);
 
-  const result = await service.lookup({
-    organizationId: "org-1",
-    serviceId: "service-1",
-    startsAt: "2026-03-16T09:00:00.000Z",
-    endsAt: "2026-03-16T12:00:00.000Z",
+  const organization = await organizationConfigurationService.create({
+    name: "BookPilot Studio",
+    slug: "bookpilot-studio",
+    timeZone: "UTC",
   });
 
-  assert.equal(result.slots.length, 1);
-  assert.equal(result.slots[0]?.startsAt.toISOString(), "2026-03-16T09:00:00.000Z");
-  assert.equal(result.slots[0]?.endsAt.toISOString(), "2026-03-16T10:00:00.000Z");
-}
-
-async function runBookingScenario(): Promise<void> {
-  const repository = new InMemoryBookingCoreRepository({
-    organizations: [
-      {
-        id: "org-1",
-        name: "BookPilot Studio",
-        slug: "bookpilot-studio",
-        timeZone: "UTC",
-      },
-    ],
-    services: [
-      {
-        id: "service-1",
-        organizationId: "org-1",
-        name: "Coaching Session",
-        description: null,
-        durationMinutes: 60,
-        active: true,
-      },
-    ],
-    staffMembers: [
-      {
-        id: "staff-1",
-        organizationId: "org-1",
-        fullName: "Jamie Doe",
-        active: true,
-      },
-    ],
-    availabilityRules: [
-      {
-        id: "rule-1",
-        organizationId: "org-1",
-        staffMemberId: "staff-1",
-        dayOfWeek: 1,
-        startTime: "09:00:00",
-        endTime: "12:00:00",
-        isActive: true,
-      },
-    ],
+  const service = await serviceConfigurationService.create({
+    organizationId: organization.id,
+    name: "Coaching Session",
+    durationMinutes: 60,
   });
-  const service = createBookingService(repository);
 
-  const created = await service.create({
-    organizationId: "org-1",
-    serviceId: "service-1",
-    startsAt: "2026-03-16T09:00:00.000Z",
+  const staffMember = await staffMemberConfigurationService.create({
+    organizationId: organization.id,
+    fullName: "Jamie Doe",
+  });
+
+  await availabilityRuleConfigurationService.create({
+    organizationId: organization.id,
+    staffMemberId: staffMember.id,
+    dayOfWeek: 1,
+    startTime: "09:00:00",
+    endTime: "12:00:00",
+  });
+
+  await timeOffConfigurationService.create({
+    organizationId: organization.id,
+    staffMemberId: staffMember.id,
+    startsAt: "2026-03-16T10:00:00.000Z",
+    endsAt: "2026-03-16T11:00:00.000Z",
+    reason: "Break",
+  });
+
+  const organizations = await organizationConfigurationService.list();
+  const services = await serviceConfigurationService.list(organization.id);
+  const staffMembers = await staffMemberConfigurationService.list(organization.id);
+  const rules = await availabilityRuleConfigurationService.list(organization.id);
+  const timeOffs = await timeOffConfigurationService.list(organization.id);
+
+  assert.equal(organizations.length, 1);
+  assert.equal(services.length, 1);
+  assert.equal(staffMembers.length, 1);
+  assert.equal(rules.length, 1);
+  assert.equal(timeOffs.length, 1);
+
+  const createdBooking = await bookingService.create({
+    organizationId: organization.id,
+    serviceId: service.id,
+    startsAt: "2026-03-16T11:00:00.000Z",
     customer: {
       fullName: "Sam Customer",
       email: "sam@example.com",
     },
   });
 
-  assert.equal(created.customer.fullName, "Sam Customer");
-  assert.equal(created.booking.staffMemberId, "staff-1");
-  assert.equal(created.booking.status, "confirmed");
+  assert.equal(createdBooking.customer.fullName, "Sam Customer");
+  assert.equal(createdBooking.booking.staffMemberId, staffMember.id);
+  assert.equal(createdBooking.booking.status, "confirmed");
+
+  const availability = await availabilityService.lookup({
+    organizationId: organization.id,
+    serviceId: service.id,
+    startsAt: "2026-03-16T09:00:00.000Z",
+    endsAt: "2026-03-16T12:00:00.000Z",
+  });
+
+  assert.equal(availability.slots.length, 1);
+  assert.equal(
+    availability.slots[0]?.startsAt.toISOString(),
+    "2026-03-16T09:00:00.000Z",
+  );
+  assert.equal(
+    availability.slots[0]?.endsAt.toISOString(),
+    "2026-03-16T10:00:00.000Z",
+  );
 
   await assert.rejects(
     () =>
-      service.create({
-        organizationId: "org-1",
-        serviceId: "service-1",
-        startsAt: "2026-03-16T09:00:00.000Z",
+      bookingService.create({
+        organizationId: organization.id,
+        serviceId: service.id,
+        startsAt: "2026-03-16T11:00:00.000Z",
         customer: {
           fullName: "Second Customer",
           email: "second@example.com",
