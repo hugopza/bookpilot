@@ -4,10 +4,10 @@ import type {
   Customer,
   CustomerContactInput,
 } from "../domain/entities";
-import { ConflictError, NotFoundError, ValidationError } from "../domain/errors";
+import { ValidationError } from "../domain/errors";
 import type { BookingRepository } from "../repositories";
-import { addMinutes, parseDateTime } from "../utils/date-time";
-import { createAvailabilityService } from "./availability-service";
+import { parseDateTime } from "../utils/date-time";
+import { resolveBookableSlot } from "./resolve-bookable-slot";
 
 export interface CreateBookingInput {
   organizationId: string;
@@ -31,36 +31,12 @@ export function createBookingService(repository: BookingRepository) {
       validateCustomer(input.customer);
 
       return repository.withTransaction(async (store) => {
-        const service = await store.getActiveService(
-          input.organizationId,
-          input.serviceId,
-        );
-
-        if (!service) {
-          throw new NotFoundError("Service was not found or is inactive.");
-        }
-
-        const availabilityService = createAvailabilityService(store);
-        const availability = await availabilityService.lookup({
+        const { slot } = await resolveBookableSlot(store, {
           organizationId: input.organizationId,
           serviceId: input.serviceId,
-          startsAt: startsAt.toISOString(),
-          endsAt: addMinutes(startsAt, service.durationMinutes).toISOString(),
+          startsAt,
           staffMemberId: input.staffMemberId,
         });
-
-        const matchingSlot = availability.slots.find(
-          (slot) =>
-            slot.startsAt.getTime() === startsAt.getTime() &&
-            (input.staffMemberId === undefined ||
-              slot.staffMemberId === input.staffMemberId),
-        );
-
-        if (!matchingSlot) {
-          throw new ConflictError(
-            "The requested booking slot is no longer available.",
-          );
-        }
 
         const customer =
           (await store.findCustomerByContact(input.organizationId, input.customer)) ??
@@ -70,9 +46,9 @@ export function createBookingService(repository: BookingRepository) {
           organizationId: input.organizationId,
           serviceId: input.serviceId,
           customerId: customer.id,
-          staffMemberId: matchingSlot.staffMemberId,
-          startsAt: matchingSlot.startsAt,
-          endsAt: matchingSlot.endsAt,
+          staffMemberId: slot.staffMemberId,
+          startsAt: slot.startsAt,
+          endsAt: slot.endsAt,
           channelOrigin,
         });
 

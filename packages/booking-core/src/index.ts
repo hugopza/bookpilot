@@ -2,6 +2,8 @@ export * from "./domain/entities";
 export * from "./domain/errors";
 export * from "./repositories";
 export * from "./services/availability-service";
+export * from "./services/booking-management-service";
 export * from "./services/configuration-service";
 export * from "./services/create-booking-service";
+export * from "./services/resolve-bookable-slot";
 export * from "./testing/in-memory-booking-core-repository";

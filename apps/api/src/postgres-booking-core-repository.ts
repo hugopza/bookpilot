@@ -178,7 +178,9 @@ export class PostgresBookingCoreRepository
     organizationId: string,
     staffMemberIds: string[],
     range: DateRange,
+    excludeBookingId?: string,
   ): Promise<TimeOff[]> {
+    void excludeBookingId;
     if (staffMemberIds.length === 0) {
       return [];
     }
@@ -221,6 +223,7 @@ export class PostgresBookingCoreRepository
     organizationId: string,
     staffMemberIds: string[],
     range: DateRange,
+    excludeBookingId?: string,
   ): Promise<Booking[]> {
     if (staffMemberIds.length === 0) {
       return [];
@@ -243,6 +246,7 @@ export class PostgresBookingCoreRepository
         where organization_id = $1
           and staff_member_id = any($2::uuid[])
           and status <> 'cancelled'
+          and ($5::uuid is null or id <> $5::uuid)
           and starts_at < $4
           and ends_at > $3
       `,
@@ -251,6 +255,53 @@ export class PostgresBookingCoreRepository
         staffMemberIds,
         range.startsAt.toISOString(),
         range.endsAt.toISOString(),
+        excludeBookingId ?? null,
+      ],
+    );
+
+    return result.rows.map(mapBooking);
+  }
+
+  async listManagedBookings(input: {
+    organizationId: string;
+    startsAt?: Date;
+    endsAt?: Date;
+    status?: Booking["status"];
+    staffMemberId?: string;
+    serviceId?: string;
+    customerId?: string;
+  }): Promise<Booking[]> {
+    const result = await this.pool.query<BookingRow>(
+      `
+        select
+          id,
+          organization_id,
+          service_id,
+          customer_id,
+          staff_member_id,
+          starts_at,
+          ends_at,
+          status,
+          channel_origin,
+          created_at
+        from bookings
+        where organization_id = $1
+          and ($2::timestamptz is null or ends_at > $2::timestamptz)
+          and ($3::timestamptz is null or starts_at < $3::timestamptz)
+          and ($4::text is null or status = $4::text)
+          and ($5::uuid is null or staff_member_id = $5::uuid)
+          and ($6::uuid is null or service_id = $6::uuid)
+          and ($7::uuid is null or customer_id = $7::uuid)
+        order by starts_at asc, id asc
+      `,
+      [
+        input.organizationId,
+        input.startsAt?.toISOString() ?? null,
+        input.endsAt?.toISOString() ?? null,
+        input.status ?? null,
+        input.staffMemberId ?? null,
+        input.serviceId ?? null,
+        input.customerId ?? null,
       ],
     );
 
@@ -471,8 +522,21 @@ class TransactionalPostgresBookingCoreStore implements BookingMutationStore {
     organizationId: string,
     staffMemberIds: string[],
     range: DateRange,
+    excludeBookingId?: string,
   ): Promise<Booking[]> {
-    return this.reader.listBookings(organizationId, staffMemberIds, range);
+    return this.reader.listBookings(
+      organizationId,
+      staffMemberIds,
+      range,
+      excludeBookingId,
+    );
+  }
+
+  async getBooking(
+    organizationId: string,
+    bookingId: string,
+  ): Promise<Booking | null> {
+    return this.reader.getBooking(organizationId, bookingId);
   }
 
   async findCustomerByContact(
@@ -577,6 +641,83 @@ class TransactionalPostgresBookingCoreStore implements BookingMutationStore {
       throw error;
     }
   }
+
+  async updateBookingStatus(input: {
+    organizationId: string;
+    bookingId: string;
+    status: Booking["status"];
+  }): Promise<Booking> {
+    const result = await this.runner.query<BookingRow>(
+      `
+        update bookings
+        set status = $3
+        where organization_id = $1
+          and id = $2
+        returning
+          id,
+          organization_id,
+          service_id,
+          customer_id,
+          staff_member_id,
+          starts_at,
+          ends_at,
+          status,
+          channel_origin,
+          created_at
+      `,
+      [input.organizationId, input.bookingId, input.status],
+    );
+
+    return mapBooking(result.rows[0]);
+  }
+
+  async updateBookingSchedule(input: {
+    organizationId: string;
+    bookingId: string;
+    staffMemberId: string;
+    startsAt: Date;
+    endsAt: Date;
+  }): Promise<Booking> {
+    try {
+      const result = await this.runner.query<BookingRow>(
+        `
+          update bookings
+          set
+            staff_member_id = $3,
+            starts_at = $4,
+            ends_at = $5
+          where organization_id = $1
+            and id = $2
+          returning
+            id,
+            organization_id,
+            service_id,
+            customer_id,
+            staff_member_id,
+            starts_at,
+            ends_at,
+            status,
+            channel_origin,
+            created_at
+        `,
+        [
+          input.organizationId,
+          input.bookingId,
+          input.staffMemberId,
+          input.startsAt.toISOString(),
+          input.endsAt.toISOString(),
+        ],
+      );
+
+      return mapBooking(result.rows[0]);
+    } catch (error) {
+      if (isExclusionViolation(error)) {
+        throw new ConflictError("Booking conflicts with an existing booking.");
+      }
+
+      throw error;
+    }
+  }
 }
 
 class QueryRunnerBackedRepository {
@@ -659,7 +800,9 @@ class QueryRunnerBackedRepository {
     organizationId: string,
     staffMemberIds: string[],
     range: DateRange,
+    excludeBookingId?: string,
   ): Promise<TimeOff[]> {
+    void excludeBookingId;
     if (staffMemberIds.length === 0) {
       return [];
     }
@@ -688,6 +831,7 @@ class QueryRunnerBackedRepository {
     organizationId: string,
     staffMemberIds: string[],
     range: DateRange,
+    excludeBookingId?: string,
   ): Promise<Booking[]> {
     if (staffMemberIds.length === 0) {
       return [];
@@ -710,6 +854,7 @@ class QueryRunnerBackedRepository {
         where organization_id = $1
           and staff_member_id = any($2::uuid[])
           and status <> 'cancelled'
+          and ($5::uuid is null or id <> $5::uuid)
           and starts_at < $4
           and ends_at > $3
       `,
@@ -718,10 +863,38 @@ class QueryRunnerBackedRepository {
         staffMemberIds,
         range.startsAt.toISOString(),
         range.endsAt.toISOString(),
+        excludeBookingId ?? null,
       ],
     );
 
     return result.rows.map(mapBooking);
+  }
+
+  async getBooking(
+    organizationId: string,
+    bookingId: string,
+  ): Promise<Booking | null> {
+    const result = await this.runner.query<BookingRow>(
+      `
+        select
+          id,
+          organization_id,
+          service_id,
+          customer_id,
+          staff_member_id,
+          starts_at,
+          ends_at,
+          status,
+          channel_origin,
+          created_at
+        from bookings
+        where organization_id = $1
+          and id = $2
+      `,
+      [organizationId, bookingId],
+    );
+
+    return result.rows[0] ? mapBooking(result.rows[0]) : null;
   }
 }
 

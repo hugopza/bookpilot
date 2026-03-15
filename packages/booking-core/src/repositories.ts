@@ -35,10 +35,15 @@ export interface AvailabilityRepository {
     organizationId: string,
     staffMemberIds: string[],
     range: DateRange,
+    excludeBookingId?: string,
   ): Promise<Booking[]>;
 }
 
 export interface BookingMutationStore extends AvailabilityRepository {
+  getBooking(
+    organizationId: string,
+    bookingId: string,
+  ): Promise<Booking | null>;
   findCustomerByContact(
     organizationId: string,
     contact: CustomerContactInput,
@@ -56,9 +61,30 @@ export interface BookingMutationStore extends AvailabilityRepository {
     endsAt: Date;
     channelOrigin: BookingChannelOrigin;
   }): Promise<Booking>;
+  updateBookingStatus(input: {
+    organizationId: string;
+    bookingId: string;
+    status: Booking["status"];
+  }): Promise<Booking>;
+  updateBookingSchedule(input: {
+    organizationId: string;
+    bookingId: string;
+    staffMemberId: string;
+    startsAt: Date;
+    endsAt: Date;
+  }): Promise<Booking>;
 }
 
 export interface BookingRepository extends AvailabilityRepository {
+  listManagedBookings(input: {
+    organizationId: string;
+    startsAt?: Date;
+    endsAt?: Date;
+    status?: Booking["status"];
+    staffMemberId?: string;
+    serviceId?: string;
+    customerId?: string;
+  }): Promise<Booking[]>;
   withTransaction<T>(
     callback: (store: BookingMutationStore) => Promise<T>,
   ): Promise<T>;

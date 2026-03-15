@@ -26,6 +26,7 @@ export interface AvailabilityLookupInput {
   endsAt: string;
   staffMemberId?: string;
   slotIntervalMinutes?: number;
+  excludeBookingId?: string;
 }
 
 export interface AvailabilityLookupResult {
@@ -94,7 +95,12 @@ export function createAvailabilityService(repository: AvailabilityRepository) {
           dayOfWeeks,
         ),
         repository.listTimeOffs(input.organizationId, staffMemberIds, range),
-        repository.listBookings(input.organizationId, staffMemberIds, range),
+        repository.listBookings(
+          input.organizationId,
+          staffMemberIds,
+          range,
+          input.excludeBookingId,
+        ),
       ]);
 
       return {

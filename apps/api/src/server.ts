@@ -4,6 +4,7 @@ import {
   type AvailabilityLookupInput,
   ConflictError,
   createAvailabilityRuleConfigurationService,
+  createBookingManagementService,
   type CreateBookingInput,
   createOrganizationConfigurationService,
   createServiceConfigurationService,
@@ -33,6 +34,7 @@ const repository = new PostgresBookingCoreRepository(
 
 const availabilityService = createAvailabilityService(repository);
 const bookingService = createBookingService(repository);
+const bookingManagementService = createBookingManagementService(repository);
 const organizationConfigurationService =
   createOrganizationConfigurationService(repository);
 const serviceConfigurationService = createServiceConfigurationService(repository);
@@ -45,7 +47,8 @@ const port = Number(process.env.PORT ?? "3001");
 
 const server = createServer(async (request, response) => {
   try {
-    const pathname = getPathname(request);
+    const url = getRequestUrl(request);
+    const pathname = url.pathname;
 
     if (request.method === "GET" && pathname === "/health") {
       writeJson(response, 200, { status: "ok" });
@@ -76,7 +79,7 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    if (request.method === "POST" && request.url === "/bookings") {
+    if (request.method === "POST" && pathname === "/bookings") {
       const payload = await readJsonBody(request);
       const result = await bookingService.create(asCreateBookingInput(payload));
       writeJson(response, 201, result);
@@ -147,6 +150,38 @@ const server = createServer(async (request, response) => {
           asCreateTimeOffConfigurationInput(payload, organizationId),
         );
         writeJson(response, 201, result);
+        return;
+      }
+
+      if (request.method === "GET" && resource === "bookings") {
+        const result = await bookingManagementService.list(
+          asListBookingsInput(url.searchParams, organizationId),
+        );
+        writeJson(response, 200, result);
+        return;
+      }
+    }
+
+    const bookingAction = matchBookingAction(pathname);
+
+    if (bookingAction) {
+      const { organizationId, bookingId, action } = bookingAction;
+
+      if (request.method === "POST" && action === "cancel") {
+        const result = await bookingManagementService.cancel({
+          organizationId,
+          bookingId,
+        });
+        writeJson(response, 200, result);
+        return;
+      }
+
+      if (request.method === "POST" && action === "reschedule") {
+        const payload = await readJsonBody(request);
+        const result = await bookingManagementService.reschedule(
+          asRescheduleBookingInput(payload, organizationId, bookingId),
+        );
+        writeJson(response, 200, result);
         return;
       }
     }
@@ -343,6 +378,55 @@ function asCreateTimeOffConfigurationInput(
   };
 }
 
+function asListBookingsInput(
+  searchParams: URLSearchParams,
+  organizationId: string,
+): {
+  organizationId: string;
+  startsAt?: string;
+  endsAt?: string;
+  status?: "confirmed" | "cancelled";
+  staffMemberId?: string;
+  serviceId?: string;
+  customerId?: string;
+} {
+  const status = searchParams.get("status");
+
+  if (status !== null && status !== "confirmed" && status !== "cancelled") {
+    throw new ValidationError("status is invalid.");
+  }
+
+  return {
+    organizationId,
+    startsAt: searchParams.get("startsAt") ?? undefined,
+    endsAt: searchParams.get("endsAt") ?? undefined,
+    status: status ?? undefined,
+    staffMemberId: searchParams.get("staffMemberId") ?? undefined,
+    serviceId: searchParams.get("serviceId") ?? undefined,
+    customerId: searchParams.get("customerId") ?? undefined,
+  };
+}
+
+function asRescheduleBookingInput(
+  value: unknown,
+  organizationId: string,
+  bookingId: string,
+): {
+  organizationId: string;
+  bookingId: string;
+  startsAt: string;
+  staffMemberId?: string;
+} {
+  const record = asRecord(value);
+
+  return {
+    organizationId,
+    bookingId,
+    startsAt: readRequiredString(record, "startsAt"),
+    staffMemberId: readOptionalString(record, "staffMemberId"),
+  };
+}
+
 function asRecord(
   value: unknown,
   fieldName = "request body",
@@ -451,8 +535,8 @@ function readOptionalChannelOrigin(
   throw new ValidationError("channelOrigin is invalid.");
 }
 
-function getPathname(request: IncomingMessage): string {
-  return new URL(request.url ?? "/", "http://localhost").pathname;
+function getRequestUrl(request: IncomingMessage): URL {
+  return new URL(request.url ?? "/", "http://localhost");
 }
 
 function matchOrganizationResource(
@@ -467,5 +551,25 @@ function matchOrganizationResource(
   return {
     organizationId: segments[1] ?? "",
     resource: segments[2] ?? "",
+  };
+}
+
+function matchBookingAction(
+  pathname: string,
+): { organizationId: string; bookingId: string; action: string } | null {
+  const segments = pathname.split("/").filter(Boolean);
+
+  if (
+    segments.length !== 5 ||
+    segments[0] !== "organizations" ||
+    segments[2] !== "bookings"
+  ) {
+    return null;
+  }
+
+  return {
+    organizationId: segments[1] ?? "",
+    bookingId: segments[3] ?? "",
+    action: segments[4] ?? "",
   };
 }

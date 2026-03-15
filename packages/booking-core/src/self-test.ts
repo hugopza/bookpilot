@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import { ConflictError } from "./domain/errors";
 import { createAvailabilityService } from "./services/availability-service";
+import { createBookingManagementService } from "./services/booking-management-service";
 import {
   createAvailabilityRuleConfigurationService,
   createOrganizationConfigurationService,
@@ -29,6 +30,7 @@ async function runConfigurationScenario(): Promise<void> {
     createAvailabilityRuleConfigurationService(repository);
   const timeOffConfigurationService = createTimeOffConfigurationService(repository);
   const bookingService = createBookingService(repository);
+  const bookingManagementService = createBookingManagementService(repository);
   const availabilityService = createAvailabilityService(repository);
 
   const organization = await organizationConfigurationService.create({
@@ -90,6 +92,15 @@ async function runConfigurationScenario(): Promise<void> {
   assert.equal(createdBooking.booking.staffMemberId, staffMember.id);
   assert.equal(createdBooking.booking.status, "confirmed");
 
+  const listedBookings = await bookingManagementService.list({
+    organizationId: organization.id,
+    startsAt: "2026-03-16T00:00:00.000Z",
+    endsAt: "2026-03-17T00:00:00.000Z",
+  });
+
+  assert.equal(listedBookings.length, 1);
+  assert.equal(listedBookings[0]?.id, createdBooking.booking.id);
+
   const availability = await availabilityService.lookup({
     organizationId: organization.id,
     serviceId: service.id,
@@ -107,18 +118,65 @@ async function runConfigurationScenario(): Promise<void> {
     "2026-03-16T10:00:00.000Z",
   );
 
+  const rescheduledBooking = await bookingManagementService.reschedule({
+    organizationId: organization.id,
+    bookingId: createdBooking.booking.id,
+    startsAt: "2026-03-16T09:00:00.000Z",
+  });
+
+  assert.equal(
+    rescheduledBooking.startsAt.toISOString(),
+    "2026-03-16T09:00:00.000Z",
+  );
+  assert.equal(
+    rescheduledBooking.endsAt.toISOString(),
+    "2026-03-16T10:00:00.000Z",
+  );
+
   await assert.rejects(
     () =>
       bookingService.create({
         organizationId: organization.id,
         serviceId: service.id,
-        startsAt: "2026-03-16T11:00:00.000Z",
+        startsAt: "2026-03-16T09:00:00.000Z",
         customer: {
           fullName: "Second Customer",
           email: "second@example.com",
         },
       }),
     ConflictError,
+  );
+
+  const cancelledBooking = await bookingManagementService.cancel({
+    organizationId: organization.id,
+    bookingId: createdBooking.booking.id,
+  });
+
+  assert.equal(cancelledBooking.status, "cancelled");
+
+  const cancelledBookings = await bookingManagementService.list({
+    organizationId: organization.id,
+    status: "cancelled",
+  });
+
+  assert.equal(cancelledBookings.length, 1);
+  assert.equal(cancelledBookings[0]?.id, createdBooking.booking.id);
+
+  const availabilityAfterCancellation = await availabilityService.lookup({
+    organizationId: organization.id,
+    serviceId: service.id,
+    startsAt: "2026-03-16T09:00:00.000Z",
+    endsAt: "2026-03-16T12:00:00.000Z",
+  });
+
+  assert.equal(availabilityAfterCancellation.slots.length, 2);
+  assert.equal(
+    availabilityAfterCancellation.slots[0]?.startsAt.toISOString(),
+    "2026-03-16T09:00:00.000Z",
+  );
+  assert.equal(
+    availabilityAfterCancellation.slots[1]?.startsAt.toISOString(),
+    "2026-03-16T11:00:00.000Z",
   );
 }
 

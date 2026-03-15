@@ -140,7 +140,9 @@ export class InMemoryBookingCoreRepository
     organizationId: string,
     staffMemberIds: string[],
     range: DateRange,
+    excludeBookingId?: string,
   ): Promise<TimeOff[]> {
+    void excludeBookingId;
     return [...this.timeOffs.values()].filter(
       (timeOff) =>
         timeOff.organizationId === organizationId &&
@@ -176,13 +178,72 @@ export class InMemoryBookingCoreRepository
     organizationId: string,
     staffMemberIds: string[],
     range: DateRange,
+    excludeBookingId?: string,
   ): Promise<Booking[]> {
     return [...this.bookings.values()].filter(
       (booking) =>
         booking.organizationId === organizationId &&
         staffMemberIds.includes(booking.staffMemberId) &&
+        booking.id !== excludeBookingId &&
         overlaps(booking.startsAt, booking.endsAt, range.startsAt, range.endsAt),
     );
+  }
+
+  async listManagedBookings(input: {
+    organizationId: string;
+    startsAt?: Date;
+    endsAt?: Date;
+    status?: Booking["status"];
+    staffMemberId?: string;
+    serviceId?: string;
+    customerId?: string;
+  }): Promise<Booking[]> {
+    return [...this.bookings.values()]
+      .filter((booking) => {
+        if (booking.organizationId !== input.organizationId) {
+          return false;
+        }
+
+        if (input.status && booking.status !== input.status) {
+          return false;
+        }
+
+        if (input.staffMemberId && booking.staffMemberId !== input.staffMemberId) {
+          return false;
+        }
+
+        if (input.serviceId && booking.serviceId !== input.serviceId) {
+          return false;
+        }
+
+        if (input.customerId && booking.customerId !== input.customerId) {
+          return false;
+        }
+
+        if (input.startsAt && booking.endsAt <= input.startsAt) {
+          return false;
+        }
+
+        if (input.endsAt && booking.startsAt >= input.endsAt) {
+          return false;
+        }
+
+        return true;
+      })
+      .sort((left, right) => left.startsAt.getTime() - right.startsAt.getTime());
+  }
+
+  async getBooking(
+    organizationId: string,
+    bookingId: string,
+  ): Promise<Booking | null> {
+    const booking = this.bookings.get(bookingId) ?? null;
+
+    if (!booking || booking.organizationId !== organizationId) {
+      return null;
+    }
+
+    return booking;
   }
 
   async findCustomerByContact(
@@ -351,6 +412,68 @@ export class InMemoryBookingCoreRepository
     this.bookings.set(booking.id, booking);
 
     return booking;
+  }
+
+  async updateBookingStatus(input: {
+    organizationId: string;
+    bookingId: string;
+    status: Booking["status"];
+  }): Promise<Booking> {
+    const booking = await this.getBooking(input.organizationId, input.bookingId);
+
+    if (!booking) {
+      throw new Error("Booking not found.");
+    }
+
+    const updatedBooking: Booking = {
+      ...booking,
+      status: input.status,
+    };
+
+    this.bookings.set(updatedBooking.id, updatedBooking);
+    return updatedBooking;
+  }
+
+  async updateBookingSchedule(input: {
+    organizationId: string;
+    bookingId: string;
+    staffMemberId: string;
+    startsAt: Date;
+    endsAt: Date;
+  }): Promise<Booking> {
+    const booking = await this.getBooking(input.organizationId, input.bookingId);
+
+    if (!booking) {
+      throw new Error("Booking not found.");
+    }
+
+    const hasConflict = [...this.bookings.values()].some(
+      (existingBooking) =>
+        existingBooking.organizationId === input.organizationId &&
+        existingBooking.id !== input.bookingId &&
+        existingBooking.staffMemberId === input.staffMemberId &&
+        existingBooking.status !== "cancelled" &&
+        overlaps(
+          existingBooking.startsAt,
+          existingBooking.endsAt,
+          input.startsAt,
+          input.endsAt,
+        ),
+    );
+
+    if (hasConflict) {
+      throw new ConflictError("Booking conflicts with an existing booking.");
+    }
+
+    const updatedBooking: Booking = {
+      ...booking,
+      staffMemberId: input.staffMemberId,
+      startsAt: input.startsAt,
+      endsAt: input.endsAt,
+    };
+
+    this.bookings.set(updatedBooking.id, updatedBooking);
+    return updatedBooking;
   }
 
   async withTransaction<T>(
