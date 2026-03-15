@@ -5,7 +5,16 @@ export type BookingEventType =
   | "booking_cancelled"
   | "booking_rescheduled";
 
-export type NotificationJobStatus = "pending";
+export type NotificationJobStatus =
+  | "pending"
+  | "processing"
+  | "succeeded"
+  | "failed";
+
+export type NotificationJobAttemptStatus =
+  | "processing"
+  | "succeeded"
+  | "failed";
 
 export type BookingChannelOrigin =
   | "api"
@@ -93,8 +102,34 @@ export interface NotificationJob {
   customerId: string;
   eventType: BookingEventType;
   status: NotificationJobStatus;
+  attemptCount: number;
+  maxAttempts: number;
+  nextAttemptAt: Date;
+  processingToken: string | null;
+  processingStartedAt: Date | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
   payload: Record<string, unknown>;
   createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface NotificationJobAttempt {
+  id: string;
+  notificationJobId: string;
+  attemptNumber: number;
+  processingToken: string;
+  status: NotificationJobAttemptStatus;
+  outcomeCode: string | null;
+  outcomeMessage: string | null;
+  outcomePayload: Record<string, unknown>;
+  startedAt: Date;
+  finishedAt: Date | null;
+}
+
+export interface ClaimedNotificationJob {
+  job: NotificationJob;
+  attempt: NotificationJobAttempt;
 }
 
 export interface AvailabilitySlot {

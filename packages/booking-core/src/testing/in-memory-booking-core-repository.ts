@@ -5,10 +5,12 @@ import type {
   Booking,
   BookingEvent,
   BookingEventType,
+  ClaimedNotificationJob,
   Customer,
   CustomerContactInput,
   DateRange,
   NotificationJob,
+  NotificationJobAttempt,
   Organization,
   Service,
   StaffMember,
@@ -20,6 +22,7 @@ import type {
   BookingMutationStore,
   BookingRepository,
   ConfigurationRepository,
+  NotificationProcessingRepository,
 } from "../repositories";
 import { overlaps } from "../utils/date-time";
 
@@ -33,13 +36,15 @@ interface SeedData {
   bookings?: Booking[];
   bookingEvents?: BookingEvent[];
   notificationJobs?: NotificationJob[];
+  notificationJobAttempts?: NotificationJobAttempt[];
 }
 
 export class InMemoryBookingCoreRepository
   implements
     BookingRepository,
     BookingMutationStore,
-    ConfigurationRepository
+    ConfigurationRepository,
+    NotificationProcessingRepository
 {
   private readonly organizations = new Map<string, Organization>();
   private readonly services = new Map<string, Service>();
@@ -50,6 +55,7 @@ export class InMemoryBookingCoreRepository
   private readonly bookings = new Map<string, Booking>();
   private readonly bookingEvents = new Map<string, BookingEvent>();
   private readonly notificationJobs = new Map<string, NotificationJob>();
+  private readonly notificationJobAttempts = new Map<string, NotificationJobAttempt>();
 
   constructor(seedData: SeedData = {}) {
     seedData.organizations?.forEach((organization) =>
@@ -72,6 +78,12 @@ export class InMemoryBookingCoreRepository
     );
     seedData.notificationJobs?.forEach((notificationJob) =>
       this.notificationJobs.set(notificationJob.id, notificationJob),
+    );
+    seedData.notificationJobAttempts?.forEach((notificationJobAttempt) =>
+      this.notificationJobAttempts.set(
+        notificationJobAttempt.id,
+        notificationJobAttempt,
+      ),
     );
   }
 
@@ -528,6 +540,7 @@ export class InMemoryBookingCoreRepository
     eventType: BookingEventType;
     payload: Record<string, unknown>;
   }): Promise<NotificationJob> {
+    const now = new Date();
     const notificationJob: NotificationJob = {
       id: randomUUID(),
       organizationId: input.organizationId,
@@ -535,8 +548,16 @@ export class InMemoryBookingCoreRepository
       customerId: input.customerId,
       eventType: input.eventType,
       status: "pending",
+      attemptCount: 0,
+      maxAttempts: 3,
+      nextAttemptAt: now,
+      processingToken: null,
+      processingStartedAt: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
       payload: input.payload,
-      createdAt: new Date(),
+      createdAt: now,
+      updatedAt: now,
     };
 
     this.notificationJobs.set(notificationJob.id, notificationJob);
@@ -549,6 +570,162 @@ export class InMemoryBookingCoreRepository
     return callback(this);
   }
 
+  async claimPendingNotificationJobs(input: {
+    limit: number;
+    now: Date;
+    staleBefore: Date;
+  }): Promise<ClaimedNotificationJob[]> {
+    const claimableJobs = [...this.notificationJobs.values()]
+      .filter((job) => {
+        if (job.status === "pending" && job.nextAttemptAt <= input.now) {
+          return job.attemptCount < job.maxAttempts;
+        }
+
+        if (
+          job.status === "processing" &&
+          job.processingStartedAt !== null &&
+          job.processingStartedAt <= input.staleBefore
+        ) {
+          return job.attemptCount < job.maxAttempts;
+        }
+
+        return false;
+      })
+      .sort((left, right) => left.nextAttemptAt.getTime() - right.nextAttemptAt.getTime())
+      .slice(0, input.limit);
+
+    return claimableJobs.map((job) => {
+      const processingToken = randomUUID();
+      const attemptNumber = job.attemptCount + 1;
+      const updatedJob: NotificationJob = {
+        ...job,
+        status: "processing",
+        attemptCount: attemptNumber,
+        processingToken,
+        processingStartedAt: input.now,
+        updatedAt: input.now,
+      };
+      const attempt: NotificationJobAttempt = {
+        id: randomUUID(),
+        notificationJobId: job.id,
+        attemptNumber,
+        processingToken,
+        status: "processing",
+        outcomeCode: null,
+        outcomeMessage: null,
+        outcomePayload: {},
+        startedAt: input.now,
+        finishedAt: null,
+      };
+
+      this.notificationJobs.set(updatedJob.id, updatedJob);
+      this.notificationJobAttempts.set(attempt.id, attempt);
+
+      return {
+        job: updatedJob,
+        attempt,
+      };
+    });
+  }
+
+  async markNotificationJobSucceeded(input: {
+    notificationJobId: string;
+    processingToken: string;
+    finishedAt: Date;
+    outcomePayload: Record<string, unknown>;
+  }): Promise<NotificationJob | null> {
+    const job = this.notificationJobs.get(input.notificationJobId) ?? null;
+
+    if (
+      !job ||
+      job.status !== "processing" ||
+      job.processingToken !== input.processingToken
+    ) {
+      return null;
+    }
+
+    const attempt = this.findAttemptByProcessingToken(input.processingToken);
+
+    if (!attempt || attempt.status !== "processing") {
+      return null;
+    }
+
+    const updatedJob: NotificationJob = {
+      ...job,
+      status: "succeeded",
+      processingToken: null,
+      processingStartedAt: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      updatedAt: input.finishedAt,
+    };
+    const updatedAttempt: NotificationJobAttempt = {
+      ...attempt,
+      status: "succeeded",
+      outcomePayload: input.outcomePayload,
+      finishedAt: input.finishedAt,
+    };
+
+    this.notificationJobs.set(updatedJob.id, updatedJob);
+    this.notificationJobAttempts.set(updatedAttempt.id, updatedAttempt);
+    return updatedJob;
+  }
+
+  async markNotificationJobFailed(input: {
+    notificationJobId: string;
+    processingToken: string;
+    finishedAt: Date;
+    retryAt: Date | null;
+    shouldRetry: boolean;
+    errorCode: string;
+    errorMessage: string;
+    outcomePayload: Record<string, unknown>;
+  }): Promise<NotificationJob | null> {
+    const job = this.notificationJobs.get(input.notificationJobId) ?? null;
+
+    if (
+      !job ||
+      job.status !== "processing" ||
+      job.processingToken !== input.processingToken
+    ) {
+      return null;
+    }
+
+    const attempt = this.findAttemptByProcessingToken(input.processingToken);
+
+    if (!attempt || attempt.status !== "processing") {
+      return null;
+    }
+
+    const hasRemainingAttempts = job.attemptCount < job.maxAttempts;
+    const nextStatus =
+      input.shouldRetry && input.retryAt !== null && hasRemainingAttempts
+        ? "pending"
+        : "failed";
+    const updatedJob: NotificationJob = {
+      ...job,
+      status: nextStatus,
+      nextAttemptAt: input.retryAt ?? job.nextAttemptAt,
+      processingToken: null,
+      processingStartedAt: null,
+      lastErrorCode: input.errorCode,
+      lastErrorMessage: input.errorMessage,
+      updatedAt: input.finishedAt,
+    };
+    const updatedAttempt: NotificationJobAttempt = {
+      ...attempt,
+      status: "failed",
+      outcomeCode: input.errorCode,
+      outcomeMessage: input.errorMessage,
+      outcomePayload: input.outcomePayload,
+      finishedAt: input.finishedAt,
+    };
+
+    this.notificationJobs.set(updatedJob.id, updatedJob);
+    this.notificationJobAttempts.set(updatedAttempt.id, updatedAttempt);
+    return updatedJob;
+  }
+
   listPersistedBookingEvents(organizationId: string): BookingEvent[] {
     return [...this.bookingEvents.values()]
       .filter((bookingEvent) => bookingEvent.organizationId === organizationId)
@@ -559,6 +736,30 @@ export class InMemoryBookingCoreRepository
     return [...this.notificationJobs.values()]
       .filter((notificationJob) => notificationJob.organizationId === organizationId)
       .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+  }
+
+  listPersistedNotificationJobAttempts(
+    organizationId: string,
+  ): NotificationJobAttempt[] {
+    const jobIds = new Set(
+      [...this.notificationJobs.values()]
+        .filter((notificationJob) => notificationJob.organizationId === organizationId)
+        .map((notificationJob) => notificationJob.id),
+    );
+
+    return [...this.notificationJobAttempts.values()]
+      .filter((attempt) => jobIds.has(attempt.notificationJobId))
+      .sort((left, right) => left.attemptNumber - right.attemptNumber);
+  }
+
+  private findAttemptByProcessingToken(
+    processingToken: string,
+  ): NotificationJobAttempt | null {
+    return (
+      [...this.notificationJobAttempts.values()].find(
+        (attempt) => attempt.processingToken === processingToken,
+      ) ?? null
+    );
   }
 }
 

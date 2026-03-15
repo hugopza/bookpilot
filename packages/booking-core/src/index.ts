@@ -6,5 +6,6 @@ export * from "./services/booking-management-service";
 export * from "./services/booking-lifecycle-support";
 export * from "./services/configuration-service";
 export * from "./services/create-booking-service";
+export * from "./services/notification-processing-service";
 export * from "./services/resolve-bookable-slot";
 export * from "./testing/in-memory-booking-core-repository";

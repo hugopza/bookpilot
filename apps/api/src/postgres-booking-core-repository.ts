@@ -12,12 +12,15 @@ import {
   type Customer,
   type CustomerContactInput,
   type DateRange,
+  type ClaimedNotificationJob,
   type NotificationJob,
+  type NotificationJobAttempt,
   type Organization,
   type Service,
   type StaffMember,
   type TimeOff,
 } from "@bookpilot/booking-core";
+import type { NotificationProcessingRepository } from "@bookpilot/booking-core";
 
 interface QueryRunner {
   query<T extends QueryResultRow>(
@@ -27,7 +30,10 @@ interface QueryRunner {
 }
 
 export class PostgresBookingCoreRepository
-  implements BookingRepository, ConfigurationRepository
+  implements
+    BookingRepository,
+    ConfigurationRepository,
+    NotificationProcessingRepository
 {
   constructor(private readonly pool: Pool) {}
 
@@ -474,6 +480,256 @@ export class PostgresBookingCoreRepository
       client.release();
     }
   }
+
+  async claimPendingNotificationJobs(input: {
+    limit: number;
+    now: Date;
+    staleBefore: Date;
+  }): Promise<ClaimedNotificationJob[]> {
+    const result = await this.pool.query<ClaimedNotificationJobRow>(
+      `
+        with candidate_jobs as (
+          select id
+          from notification_jobs
+          where (
+            (status = 'pending' and next_attempt_at <= $1)
+            or (status = 'processing' and processing_started_at <= $2)
+          )
+            and attempt_count < max_attempts
+          order by next_attempt_at asc, created_at asc
+          limit $3
+          for update skip locked
+        ),
+        updated_jobs as (
+          update notification_jobs notification_jobs
+          set
+            status = 'processing',
+            attempt_count = notification_jobs.attempt_count + 1,
+            processing_token = gen_random_uuid()::text,
+            processing_started_at = $1,
+            last_error_code = null,
+            last_error_message = null,
+            updated_at = $1
+          from candidate_jobs
+          where notification_jobs.id = candidate_jobs.id
+          returning
+            notification_jobs.id,
+            notification_jobs.organization_id,
+            notification_jobs.booking_id,
+            notification_jobs.customer_id,
+            notification_jobs.event_type,
+            notification_jobs.status,
+            notification_jobs.attempt_count,
+            notification_jobs.max_attempts,
+            notification_jobs.next_attempt_at,
+            notification_jobs.processing_token,
+            notification_jobs.processing_started_at,
+            notification_jobs.last_error_code,
+            notification_jobs.last_error_message,
+            notification_jobs.payload,
+            notification_jobs.created_at,
+            notification_jobs.updated_at
+        ),
+        inserted_attempts as (
+          insert into notification_job_attempts (
+            notification_job_id,
+            attempt_number,
+            processing_token,
+            status,
+            started_at
+          )
+          select
+            id,
+            attempt_count,
+            processing_token,
+            'processing',
+            processing_started_at
+          from updated_jobs
+          returning
+            id,
+            notification_job_id,
+            attempt_number,
+            processing_token,
+            status,
+            outcome_code,
+            outcome_message,
+            outcome_payload,
+            started_at,
+            finished_at
+        )
+        select
+          updated_jobs.id as job_id,
+          updated_jobs.organization_id as job_organization_id,
+          updated_jobs.booking_id as job_booking_id,
+          updated_jobs.customer_id as job_customer_id,
+          updated_jobs.event_type as job_event_type,
+          updated_jobs.status as job_status,
+          updated_jobs.attempt_count as job_attempt_count,
+          updated_jobs.max_attempts as job_max_attempts,
+          updated_jobs.next_attempt_at as job_next_attempt_at,
+          updated_jobs.processing_token as job_processing_token,
+          updated_jobs.processing_started_at as job_processing_started_at,
+          updated_jobs.last_error_code as job_last_error_code,
+          updated_jobs.last_error_message as job_last_error_message,
+          updated_jobs.payload as job_payload,
+          updated_jobs.created_at as job_created_at,
+          updated_jobs.updated_at as job_updated_at,
+          inserted_attempts.id as attempt_id,
+          inserted_attempts.notification_job_id as attempt_notification_job_id,
+          inserted_attempts.attempt_number as attempt_attempt_number,
+          inserted_attempts.processing_token as attempt_processing_token,
+          inserted_attempts.status as attempt_status,
+          inserted_attempts.outcome_code as attempt_outcome_code,
+          inserted_attempts.outcome_message as attempt_outcome_message,
+          inserted_attempts.outcome_payload as attempt_outcome_payload,
+          inserted_attempts.started_at as attempt_started_at,
+          inserted_attempts.finished_at as attempt_finished_at
+        from updated_jobs
+        inner join inserted_attempts
+          on inserted_attempts.notification_job_id = updated_jobs.id
+         and inserted_attempts.attempt_number = updated_jobs.attempt_count
+      `,
+      [input.now.toISOString(), input.staleBefore.toISOString(), input.limit],
+    );
+
+    return result.rows.map(mapClaimedNotificationJob);
+  }
+
+  async markNotificationJobSucceeded(input: {
+    notificationJobId: string;
+    processingToken: string;
+    finishedAt: Date;
+    outcomePayload: Record<string, unknown>;
+  }): Promise<NotificationJob | null> {
+    const result = await this.pool.query<NotificationJobRow>(
+      `
+        with updated_attempt as (
+          update notification_job_attempts
+          set
+            status = 'succeeded',
+            outcome_payload = $4::jsonb,
+            finished_at = $3
+          where notification_job_id = $1
+            and processing_token = $2
+            and status = 'processing'
+          returning notification_job_id
+        )
+        update notification_jobs
+        set
+          status = 'succeeded',
+          processing_token = null,
+          processing_started_at = null,
+          last_error_code = null,
+          last_error_message = null,
+          updated_at = $3
+        where id = $1
+          and processing_token = $2
+          and exists (select 1 from updated_attempt)
+        returning
+          id,
+          organization_id,
+          booking_id,
+          customer_id,
+          event_type,
+          status,
+          attempt_count,
+          max_attempts,
+          next_attempt_at,
+          processing_token,
+          processing_started_at,
+          last_error_code,
+          last_error_message,
+          payload,
+          created_at,
+          updated_at
+      `,
+      [
+        input.notificationJobId,
+        input.processingToken,
+        input.finishedAt.toISOString(),
+        JSON.stringify(input.outcomePayload),
+      ],
+    );
+
+    return result.rows[0] ? mapNotificationJob(result.rows[0]) : null;
+  }
+
+  async markNotificationJobFailed(input: {
+    notificationJobId: string;
+    processingToken: string;
+    finishedAt: Date;
+    retryAt: Date | null;
+    shouldRetry: boolean;
+    errorCode: string;
+    errorMessage: string;
+    outcomePayload: Record<string, unknown>;
+  }): Promise<NotificationJob | null> {
+    const result = await this.pool.query<NotificationJobRow>(
+      `
+        with updated_attempt as (
+          update notification_job_attempts
+          set
+            status = 'failed',
+            outcome_code = $4,
+            outcome_message = $5,
+            outcome_payload = $6::jsonb,
+            finished_at = $3
+          where notification_job_id = $1
+            and processing_token = $2
+            and status = 'processing'
+          returning notification_job_id
+        )
+        update notification_jobs
+        set
+          status = case
+            when $7 = true and attempt_count < max_attempts then 'pending'
+            else 'failed'
+          end,
+          next_attempt_at = case
+            when $7 = true and $8::timestamptz is not null and attempt_count < max_attempts
+              then $8::timestamptz
+            else next_attempt_at
+          end,
+          processing_token = null,
+          processing_started_at = null,
+          last_error_code = $4,
+          last_error_message = $5,
+          updated_at = $3
+        where id = $1
+          and processing_token = $2
+          and exists (select 1 from updated_attempt)
+        returning
+          id,
+          organization_id,
+          booking_id,
+          customer_id,
+          event_type,
+          status,
+          attempt_count,
+          max_attempts,
+          next_attempt_at,
+          processing_token,
+          processing_started_at,
+          last_error_code,
+          last_error_message,
+          payload,
+          created_at,
+          updated_at
+      `,
+      [
+        input.notificationJobId,
+        input.processingToken,
+        input.finishedAt.toISOString(),
+        input.errorCode,
+        input.errorMessage,
+        JSON.stringify(input.outcomePayload),
+        input.shouldRetry,
+        input.retryAt?.toISOString() ?? null,
+      ],
+    );
+
+    return result.rows[0] ? mapNotificationJob(result.rows[0]) : null;
+  }
 }
 
 class TransactionalPostgresBookingCoreStore implements BookingMutationStore {
@@ -788,8 +1044,16 @@ class TransactionalPostgresBookingCoreStore implements BookingMutationStore {
           customer_id,
           event_type,
           status,
+          attempt_count,
+          max_attempts,
+          next_attempt_at,
+          processing_token,
+          processing_started_at,
+          last_error_code,
+          last_error_message,
           payload,
-          created_at
+          created_at,
+          updated_at
       `,
       [
         input.organizationId,
@@ -1078,8 +1342,58 @@ interface NotificationJobRow {
   customer_id: string;
   event_type: BookingEventType;
   status: NotificationJob["status"];
+  attempt_count: number;
+  max_attempts: number;
+  next_attempt_at: Date | string;
+  processing_token: string | null;
+  processing_started_at: Date | string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
   payload: Record<string, unknown> | string;
   created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface NotificationJobAttemptRow {
+  id: string;
+  notification_job_id: string;
+  attempt_number: number;
+  processing_token: string;
+  status: NotificationJobAttempt["status"];
+  outcome_code: string | null;
+  outcome_message: string | null;
+  outcome_payload: Record<string, unknown> | string;
+  started_at: Date | string;
+  finished_at: Date | string | null;
+}
+
+interface ClaimedNotificationJobRow {
+  job_id: string;
+  job_organization_id: string;
+  job_booking_id: string;
+  job_customer_id: string;
+  job_event_type: BookingEventType;
+  job_status: NotificationJob["status"];
+  job_attempt_count: number;
+  job_max_attempts: number;
+  job_next_attempt_at: Date | string;
+  job_processing_token: string | null;
+  job_processing_started_at: Date | string | null;
+  job_last_error_code: string | null;
+  job_last_error_message: string | null;
+  job_payload: Record<string, unknown> | string;
+  job_created_at: Date | string;
+  job_updated_at: Date | string;
+  attempt_id: string;
+  attempt_notification_job_id: string;
+  attempt_attempt_number: number;
+  attempt_processing_token: string;
+  attempt_status: NotificationJobAttempt["status"];
+  attempt_outcome_code: string | null;
+  attempt_outcome_message: string | null;
+  attempt_outcome_payload: Record<string, unknown> | string;
+  attempt_started_at: Date | string;
+  attempt_finished_at: Date | string | null;
 }
 
 function mapOrganization(row: OrganizationRow): Organization {
@@ -1178,8 +1492,72 @@ function mapNotificationJob(row: NotificationJobRow): NotificationJob {
     customerId: row.customer_id,
     eventType: row.event_type,
     status: row.status,
+    attemptCount: row.attempt_count,
+    maxAttempts: row.max_attempts,
+    nextAttemptAt: toDate(row.next_attempt_at),
+    processingToken: row.processing_token,
+    processingStartedAt: row.processing_started_at
+      ? toDate(row.processing_started_at)
+      : null,
+    lastErrorCode: row.last_error_code,
+    lastErrorMessage: row.last_error_message,
     payload: toRecord(row.payload),
     createdAt: toDate(row.created_at),
+    updatedAt: toDate(row.updated_at),
+  };
+}
+
+function mapNotificationJobAttempt(
+  row: NotificationJobAttemptRow,
+): NotificationJobAttempt {
+  return {
+    id: row.id,
+    notificationJobId: row.notification_job_id,
+    attemptNumber: row.attempt_number,
+    processingToken: row.processing_token,
+    status: row.status,
+    outcomeCode: row.outcome_code,
+    outcomeMessage: row.outcome_message,
+    outcomePayload: toRecord(row.outcome_payload),
+    startedAt: toDate(row.started_at),
+    finishedAt: row.finished_at ? toDate(row.finished_at) : null,
+  };
+}
+
+function mapClaimedNotificationJob(
+  row: ClaimedNotificationJobRow,
+): ClaimedNotificationJob {
+  return {
+    job: mapNotificationJob({
+      id: row.job_id,
+      organization_id: row.job_organization_id,
+      booking_id: row.job_booking_id,
+      customer_id: row.job_customer_id,
+      event_type: row.job_event_type,
+      status: row.job_status,
+      attempt_count: row.job_attempt_count,
+      max_attempts: row.job_max_attempts,
+      next_attempt_at: row.job_next_attempt_at,
+      processing_token: row.job_processing_token,
+      processing_started_at: row.job_processing_started_at,
+      last_error_code: row.job_last_error_code,
+      last_error_message: row.job_last_error_message,
+      payload: row.job_payload,
+      created_at: row.job_created_at,
+      updated_at: row.job_updated_at,
+    }),
+    attempt: mapNotificationJobAttempt({
+      id: row.attempt_id,
+      notification_job_id: row.attempt_notification_job_id,
+      attempt_number: row.attempt_attempt_number,
+      processing_token: row.attempt_processing_token,
+      status: row.attempt_status,
+      outcome_code: row.attempt_outcome_code,
+      outcome_message: row.attempt_outcome_message,
+      outcome_payload: row.attempt_outcome_payload,
+      started_at: row.attempt_started_at,
+      finished_at: row.attempt_finished_at,
+    }),
   };
 }
 

@@ -11,6 +11,7 @@ import {
   createTimeOffConfigurationService,
 } from "./services/configuration-service";
 import { createBookingService } from "./services/create-booking-service";
+import { createNotificationProcessingService } from "./services/notification-processing-service";
 import { InMemoryBookingCoreRepository } from "./testing/in-memory-booking-core-repository";
 
 async function main(): Promise<void> {
@@ -32,6 +33,51 @@ async function runConfigurationScenario(): Promise<void> {
   const bookingService = createBookingService(repository);
   const bookingManagementService = createBookingManagementService(repository);
   const availabilityService = createAvailabilityService(repository);
+  const notificationProcessingService = createNotificationProcessingService(
+    repository,
+    {
+      async deliver(claimedJob) {
+        if (
+          claimedJob.job.eventType === "booking_created" ||
+          claimedJob.attempt.attemptNumber > 1
+        ) {
+          return {
+            outcome: "succeeded" as const,
+            payload: {
+              mode: "test",
+              eventType: claimedJob.job.eventType,
+              attemptNumber: claimedJob.attempt.attemptNumber,
+            },
+          };
+        }
+
+        if (claimedJob.job.eventType === "booking_rescheduled") {
+          return {
+            outcome: "failed" as const,
+            retryable: true,
+            code: "TEMPORARY_DELIVERY_FAILURE",
+            message: "Retry later.",
+            payload: {
+              eventType: claimedJob.job.eventType,
+              attemptNumber: claimedJob.attempt.attemptNumber,
+            },
+            retryDelayMinutes: 10,
+          };
+        }
+
+        return {
+          outcome: "failed" as const,
+          retryable: false,
+          code: "UNSUPPORTED_DELIVERY_TARGET",
+          message: "No delivery adapter configured.",
+          payload: {
+            eventType: claimedJob.job.eventType,
+            attemptNumber: claimedJob.attempt.attemptNumber,
+          },
+        };
+      },
+    },
+  );
 
   const organization = await organizationConfigurationService.create({
     name: "BookPilot Studio",
@@ -195,6 +241,78 @@ async function runConfigurationScenario(): Promise<void> {
   assert.equal(notificationJobs[0]?.status, "pending");
   assert.equal(notificationJobs[1]?.status, "pending");
   assert.equal(notificationJobs[2]?.status, "pending");
+
+  const firstProcessingRun = await notificationProcessingService.processPending({
+    limit: 10,
+    now: new Date("2026-03-16T12:00:00.000Z"),
+  });
+
+  assert.deepEqual(firstProcessingRun, {
+    claimedJobs: 3,
+    succeededJobs: 1,
+    failedJobs: 1,
+    retriedJobs: 1,
+  });
+
+  const jobsAfterFirstRun = repository.listPersistedNotificationJobs(organization.id);
+  const attemptsAfterFirstRun =
+    repository.listPersistedNotificationJobAttempts(organization.id);
+
+  assert.equal(jobsAfterFirstRun[0]?.status, "succeeded");
+  assert.equal(jobsAfterFirstRun[0]?.attemptCount, 1);
+  assert.equal(jobsAfterFirstRun[1]?.status, "pending");
+  assert.equal(jobsAfterFirstRun[1]?.attemptCount, 1);
+  assert.equal(
+    jobsAfterFirstRun[1]?.nextAttemptAt.toISOString(),
+    "2026-03-16T12:10:00.000Z",
+  );
+  assert.equal(jobsAfterFirstRun[1]?.lastErrorCode, "TEMPORARY_DELIVERY_FAILURE");
+  assert.equal(jobsAfterFirstRun[2]?.status, "failed");
+  assert.equal(jobsAfterFirstRun[2]?.attemptCount, 1);
+  assert.equal(jobsAfterFirstRun[2]?.lastErrorCode, "UNSUPPORTED_DELIVERY_TARGET");
+
+  assert.equal(attemptsAfterFirstRun.length, 3);
+  assert.equal(attemptsAfterFirstRun[0]?.status, "succeeded");
+  assert.equal(attemptsAfterFirstRun[0]?.attemptNumber, 1);
+  assert.equal(attemptsAfterFirstRun[1]?.status, "failed");
+  assert.equal(attemptsAfterFirstRun[1]?.outcomeCode, "TEMPORARY_DELIVERY_FAILURE");
+  assert.equal(attemptsAfterFirstRun[2]?.status, "failed");
+  assert.equal(attemptsAfterFirstRun[2]?.outcomeCode, "UNSUPPORTED_DELIVERY_TARGET");
+
+  const secondProcessingRun = await notificationProcessingService.processPending({
+    limit: 10,
+    now: new Date("2026-03-16T12:10:00.000Z"),
+  });
+
+  assert.deepEqual(secondProcessingRun, {
+    claimedJobs: 1,
+    succeededJobs: 1,
+    failedJobs: 0,
+    retriedJobs: 0,
+  });
+
+  const jobsAfterSecondRun = repository.listPersistedNotificationJobs(organization.id);
+  const attemptsAfterSecondRun =
+    repository.listPersistedNotificationJobAttempts(organization.id);
+
+  assert.equal(jobsAfterSecondRun[1]?.status, "succeeded");
+  assert.equal(jobsAfterSecondRun[1]?.attemptCount, 2);
+  assert.equal(jobsAfterSecondRun[1]?.processingToken, null);
+  assert.equal(attemptsAfterSecondRun.length, 4);
+  assert.equal(attemptsAfterSecondRun[3]?.attemptNumber, 2);
+  assert.equal(attemptsAfterSecondRun[3]?.status, "succeeded");
+
+  const thirdProcessingRun = await notificationProcessingService.processPending({
+    limit: 10,
+    now: new Date("2026-03-16T12:11:00.000Z"),
+  });
+
+  assert.deepEqual(thirdProcessingRun, {
+    claimedJobs: 0,
+    succeededJobs: 0,
+    failedJobs: 0,
+    retriedJobs: 0,
+  });
 }
 
 void main().catch((error: unknown) => {

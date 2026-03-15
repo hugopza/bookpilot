@@ -465,11 +465,22 @@ This entity is useful when asynchronous delivery and retry behavior matter.
 - may reference a booking
 - may reference a customer
 - may reference a conversation thread or channel context
+- may have one or more delivery attempts when reliable processing is required
+
+### Typical attributes
+
+- event or notification type
+- processing status
+- retry counters or attempt limits
+- next-attempt scheduling state
+- last known processing error when relevant
+- payload needed by downstream delivery adapters
 
 ### Invariants
 
 - notification tracking must not become the source of booking truth
 - failed or delayed notification delivery must not corrupt canonical booking state
+- retry and idempotency state should remain inside the platform rather than inside transport providers
 
 ---
 

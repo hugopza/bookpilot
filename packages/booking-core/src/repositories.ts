@@ -4,10 +4,12 @@ import type {
   BookingEvent,
   BookingEventType,
   BookingChannelOrigin,
+  ClaimedNotificationJob,
   Customer,
   CustomerContactInput,
   DateRange,
   NotificationJob,
+  NotificationJobAttempt,
   Organization,
   Service,
   StaffMember,
@@ -108,6 +110,30 @@ export interface BookingRepository extends AvailabilityRepository {
   withTransaction<T>(
     callback: (store: BookingMutationStore) => Promise<T>,
   ): Promise<T>;
+}
+
+export interface NotificationProcessingRepository {
+  claimPendingNotificationJobs(input: {
+    limit: number;
+    now: Date;
+    staleBefore: Date;
+  }): Promise<ClaimedNotificationJob[]>;
+  markNotificationJobSucceeded(input: {
+    notificationJobId: string;
+    processingToken: string;
+    finishedAt: Date;
+    outcomePayload: Record<string, unknown>;
+  }): Promise<NotificationJob | null>;
+  markNotificationJobFailed(input: {
+    notificationJobId: string;
+    processingToken: string;
+    finishedAt: Date;
+    retryAt: Date | null;
+    shouldRetry: boolean;
+    errorCode: string;
+    errorMessage: string;
+    outcomePayload: Record<string, unknown>;
+  }): Promise<NotificationJob | null>;
 }
 
 export interface ConfigurationRepository
