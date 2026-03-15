@@ -1,0 +1,10 @@
+{
+  "name": "@bookpilot/api",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/server.js",
+  "dependencies": {
+    "@bookpilot/booking-core": "file:../../packages/booking-core",
+    "pg": "^8.13.3"
+  }
+}

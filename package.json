@@ -1,0 +1,20 @@
+{
+  "name": "bookpilot",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "npm run build && node packages/booking-core/dist/self-test.js",
+    "start:api": "node apps/api/dist/server.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "@types/pg": "^8.11.11",
+    "typescript": "^5.8.3"
+  }
+}

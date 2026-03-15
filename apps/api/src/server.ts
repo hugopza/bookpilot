@@ -1,0 +1,228 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+
+import {
+  type AvailabilityLookupInput,
+  ConflictError,
+  type CreateBookingInput,
+  DomainError,
+  NotFoundError,
+  ValidationError,
+  createAvailabilityService,
+  createBookingService,
+} from "@bookpilot/booking-core";
+import { Pool } from "pg";
+
+import { PostgresBookingCoreRepository } from "./postgres-booking-core-repository";
+
+const databaseUrl = process.env.DATABASE_URL;
+
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is required to start the API.");
+}
+
+const repository = new PostgresBookingCoreRepository(
+  new Pool({
+    connectionString: databaseUrl,
+  }),
+);
+
+const availabilityService = createAvailabilityService(repository);
+const bookingService = createBookingService(repository);
+const port = Number(process.env.PORT ?? "3001");
+
+const server = createServer(async (request, response) => {
+  try {
+    if (request.method === "GET" && request.url === "/health") {
+      writeJson(response, 200, { status: "ok" });
+      return;
+    }
+
+    if (request.method === "POST" && request.url === "/availability/search") {
+      const payload = await readJsonBody(request);
+      const result = await availabilityService.lookup(
+        asAvailabilityLookupInput(payload),
+      );
+      writeJson(response, 200, result);
+      return;
+    }
+
+    if (request.method === "POST" && request.url === "/bookings") {
+      const payload = await readJsonBody(request);
+      const result = await bookingService.create(asCreateBookingInput(payload));
+      writeJson(response, 201, result);
+      return;
+    }
+
+    writeJson(response, 404, { error: "Not found" });
+  } catch (error) {
+    handleError(response, error);
+  }
+});
+
+server.listen(port, () => {
+  console.log(`BookPilot API listening on port ${port}`);
+});
+
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  const chunks: Uint8Array[] = [];
+
+  for await (const chunk of request) {
+    chunks.push(chunk);
+  }
+
+  const body = Buffer.concat(chunks).toString("utf8");
+
+  if (body.length === 0) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new ValidationError("Request body must be valid JSON.");
+  }
+}
+
+function writeJson(
+  response: ServerResponse,
+  statusCode: number,
+  payload: unknown,
+): void {
+  response.statusCode = statusCode;
+  response.setHeader("content-type", "application/json; charset=utf-8");
+  response.end(JSON.stringify(payload));
+}
+
+function handleError(response: ServerResponse, error: unknown): void {
+  if (error instanceof ValidationError) {
+    writeJson(response, 400, { error: error.message, code: error.code });
+    return;
+  }
+
+  if (error instanceof NotFoundError) {
+    writeJson(response, 404, { error: error.message, code: error.code });
+    return;
+  }
+
+  if (error instanceof ConflictError) {
+    writeJson(response, 409, { error: error.message, code: error.code });
+    return;
+  }
+
+  if (error instanceof DomainError) {
+    writeJson(response, 400, { error: error.message, code: error.code });
+    return;
+  }
+
+  console.error(error);
+  writeJson(response, 500, { error: "Internal server error" });
+}
+
+function asAvailabilityLookupInput(value: unknown): AvailabilityLookupInput {
+  const record = asRecord(value);
+
+  return {
+    organizationId: readRequiredString(record, "organizationId"),
+    serviceId: readRequiredString(record, "serviceId"),
+    startsAt: readRequiredString(record, "startsAt"),
+    endsAt: readRequiredString(record, "endsAt"),
+    staffMemberId: readOptionalString(record, "staffMemberId"),
+    slotIntervalMinutes: readOptionalNumber(record, "slotIntervalMinutes"),
+  };
+}
+
+function asCreateBookingInput(value: unknown): CreateBookingInput {
+  const record = asRecord(value);
+  const customerRecord = asRecord(record.customer, "customer");
+
+  return {
+    organizationId: readRequiredString(record, "organizationId"),
+    serviceId: readRequiredString(record, "serviceId"),
+    startsAt: readRequiredString(record, "startsAt"),
+    staffMemberId: readOptionalString(record, "staffMemberId"),
+    channelOrigin: readOptionalChannelOrigin(record.channelOrigin),
+    customer: {
+      fullName: readRequiredString(customerRecord, "fullName"),
+      phone: readOptionalString(customerRecord, "phone"),
+      email: readOptionalString(customerRecord, "email"),
+    },
+  };
+}
+
+function asRecord(
+  value: unknown,
+  fieldName = "request body",
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ValidationError(`${fieldName} must be a JSON object.`);
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function readRequiredString(
+  record: Record<string, unknown>,
+  fieldName: string,
+): string {
+  const value = record[fieldName];
+
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ValidationError(`${fieldName} must be a non-empty string.`);
+  }
+
+  return value;
+}
+
+function readOptionalString(
+  record: Record<string, unknown>,
+  fieldName: string,
+): string | undefined {
+  const value = record[fieldName];
+
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw new ValidationError(`${fieldName} must be a string when provided.`);
+  }
+
+  return value;
+}
+
+function readOptionalNumber(
+  record: Record<string, unknown>,
+  fieldName: string,
+): number | undefined {
+  const value = record[fieldName];
+
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new ValidationError(`${fieldName} must be a finite number.`);
+  }
+
+  return value;
+}
+
+function readOptionalChannelOrigin(
+  value: unknown,
+): CreateBookingInput["channelOrigin"] {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (
+    value === "api" ||
+    value === "web" ||
+    value === "whatsapp" ||
+    value === "voice" ||
+    value === "dashboard"
+  ) {
+    return value;
+  }
+
+  throw new ValidationError("channelOrigin is invalid.");
+}
