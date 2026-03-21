@@ -13,8 +13,10 @@ import {
   type CustomerContactInput,
   type DateRange,
   type ClaimedNotificationJob,
+  type NotificationChannel,
   type NotificationJob,
   type NotificationJobAttempt,
+  type OrganizationNotificationChannelConfiguration,
   type Organization,
   type Service,
   type StaffMember,
@@ -226,6 +228,103 @@ export class PostgresBookingCoreRepository
     );
 
     return result.rows.map(mapTimeOff);
+  }
+
+  async listOrganizationNotificationChannelConfigurations(
+    organizationId: string,
+  ): Promise<OrganizationNotificationChannelConfiguration[]> {
+    const result = await this.pool.query<OrganizationNotificationChannelConfigurationRow>(
+      `
+        select
+          id,
+          organization_id,
+          channel,
+          enabled,
+          notification_provider_key,
+          provider_config,
+          created_at,
+          updated_at
+        from organization_notification_channel_configurations
+        where organization_id = $1
+        order by channel asc
+      `,
+      [organizationId],
+    );
+
+    return result.rows.map(mapOrganizationNotificationChannelConfiguration);
+  }
+
+  async getOrganizationNotificationChannelConfiguration(
+    organizationId: string,
+    channel: NotificationChannel,
+  ): Promise<OrganizationNotificationChannelConfiguration | null> {
+    const result = await this.pool.query<OrganizationNotificationChannelConfigurationRow>(
+      `
+        select
+          id,
+          organization_id,
+          channel,
+          enabled,
+          notification_provider_key,
+          provider_config,
+          created_at,
+          updated_at
+        from organization_notification_channel_configurations
+        where organization_id = $1
+          and channel = $2
+      `,
+      [organizationId, channel],
+    );
+
+    return result.rows[0]
+      ? mapOrganizationNotificationChannelConfiguration(result.rows[0])
+      : null;
+  }
+
+  async upsertOrganizationNotificationChannelConfiguration(input: {
+    organizationId: string;
+    channel: NotificationChannel;
+    enabled: boolean;
+    notificationProviderKey: string | null;
+    providerConfig: Record<string, unknown>;
+  }): Promise<OrganizationNotificationChannelConfiguration> {
+    const result = await this.pool.query<OrganizationNotificationChannelConfigurationRow>(
+      `
+        insert into organization_notification_channel_configurations (
+          organization_id,
+          channel,
+          enabled,
+          notification_provider_key,
+          provider_config
+        )
+        values ($1, $2, $3, $4, $5::jsonb)
+        on conflict (organization_id, channel)
+        do update
+          set
+            enabled = excluded.enabled,
+            notification_provider_key = excluded.notification_provider_key,
+            provider_config = excluded.provider_config,
+            updated_at = now()
+        returning
+          id,
+          organization_id,
+          channel,
+          enabled,
+          notification_provider_key,
+          provider_config,
+          created_at,
+          updated_at
+      `,
+      [
+        input.organizationId,
+        input.channel,
+        input.enabled,
+        input.notificationProviderKey,
+        JSON.stringify(input.providerConfig),
+      ],
+    );
+
+    return mapOrganizationNotificationChannelConfiguration(result.rows[0]);
   }
 
   async listBookings(
@@ -517,6 +616,7 @@ export class PostgresBookingCoreRepository
             notification_jobs.organization_id,
             notification_jobs.booking_id,
             notification_jobs.customer_id,
+            notification_jobs.delivery_channel,
             notification_jobs.event_type,
             notification_jobs.status,
             notification_jobs.attempt_count,
@@ -562,6 +662,7 @@ export class PostgresBookingCoreRepository
           updated_jobs.organization_id as job_organization_id,
           updated_jobs.booking_id as job_booking_id,
           updated_jobs.customer_id as job_customer_id,
+          updated_jobs.delivery_channel as job_delivery_channel,
           updated_jobs.event_type as job_event_type,
           updated_jobs.status as job_status,
           updated_jobs.attempt_count as job_attempt_count,
@@ -630,6 +731,7 @@ export class PostgresBookingCoreRepository
           organization_id,
           booking_id,
           customer_id,
+          delivery_channel,
           event_type,
           status,
           attempt_count,
@@ -703,6 +805,7 @@ export class PostgresBookingCoreRepository
           organization_id,
           booking_id,
           customer_id,
+          delivery_channel,
           event_type,
           status,
           attempt_count,
@@ -1023,6 +1126,7 @@ class TransactionalPostgresBookingCoreStore implements BookingMutationStore {
     organizationId: string;
     bookingId: string;
     customerId: string;
+    deliveryChannel: NotificationChannel;
     eventType: BookingEventType;
     payload: Record<string, unknown>;
   }): Promise<NotificationJob> {
@@ -1032,16 +1136,18 @@ class TransactionalPostgresBookingCoreStore implements BookingMutationStore {
           organization_id,
           booking_id,
           customer_id,
+          delivery_channel,
           event_type,
           status,
           payload
         )
-        values ($1, $2, $3, $4, 'pending', $5::jsonb)
+        values ($1, $2, $3, $4, $5, 'pending', $6::jsonb)
         returning
           id,
           organization_id,
           booking_id,
           customer_id,
+          delivery_channel,
           event_type,
           status,
           attempt_count,
@@ -1059,6 +1165,7 @@ class TransactionalPostgresBookingCoreStore implements BookingMutationStore {
         input.organizationId,
         input.bookingId,
         input.customerId,
+        input.deliveryChannel,
         input.eventType,
         JSON.stringify(input.payload),
       ],
@@ -1340,6 +1447,7 @@ interface NotificationJobRow {
   organization_id: string;
   booking_id: string;
   customer_id: string;
+  delivery_channel: NotificationChannel;
   event_type: BookingEventType;
   status: NotificationJob["status"];
   attempt_count: number;
@@ -1372,6 +1480,7 @@ interface ClaimedNotificationJobRow {
   job_organization_id: string;
   job_booking_id: string;
   job_customer_id: string;
+  job_delivery_channel: NotificationChannel;
   job_event_type: BookingEventType;
   job_status: NotificationJob["status"];
   job_attempt_count: number;
@@ -1394,6 +1503,17 @@ interface ClaimedNotificationJobRow {
   attempt_outcome_payload: Record<string, unknown> | string;
   attempt_started_at: Date | string;
   attempt_finished_at: Date | string | null;
+}
+
+interface OrganizationNotificationChannelConfigurationRow {
+  id: string;
+  organization_id: string;
+  channel: NotificationChannel;
+  enabled: boolean;
+  notification_provider_key: string | null;
+  provider_config: Record<string, unknown> | string;
+  created_at: Date | string;
+  updated_at: Date | string;
 }
 
 function mapOrganization(row: OrganizationRow): Organization {
@@ -1484,12 +1604,28 @@ function mapBookingEvent(row: BookingEventRow): BookingEvent {
   };
 }
 
+function mapOrganizationNotificationChannelConfiguration(
+  row: OrganizationNotificationChannelConfigurationRow,
+): OrganizationNotificationChannelConfiguration {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    channel: row.channel,
+    enabled: row.enabled,
+    notificationProviderKey: row.notification_provider_key,
+    providerConfig: toRecord(row.provider_config),
+    createdAt: toDate(row.created_at),
+    updatedAt: toDate(row.updated_at),
+  };
+}
+
 function mapNotificationJob(row: NotificationJobRow): NotificationJob {
   return {
     id: row.id,
     organizationId: row.organization_id,
     bookingId: row.booking_id,
     customerId: row.customer_id,
+    deliveryChannel: row.delivery_channel,
     eventType: row.event_type,
     status: row.status,
     attemptCount: row.attempt_count,
@@ -1533,6 +1669,7 @@ function mapClaimedNotificationJob(
       organization_id: row.job_organization_id,
       booking_id: row.job_booking_id,
       customer_id: row.job_customer_id,
+      delivery_channel: row.job_delivery_channel,
       event_type: row.job_event_type,
       status: row.job_status,
       attempt_count: row.job_attempt_count,

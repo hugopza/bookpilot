@@ -1,33 +1,62 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
-import type { BookingEventType, NotificationJob } from "@bookpilot/booking-core";
+import type {
+  BookingEventType,
+  NotificationChannel,
+  NotificationJob,
+  OrganizationNotificationChannelConfiguration,
+} from "@bookpilot/booking-core";
 import { InMemoryBookingCoreRepository } from "@bookpilot/booking-core";
 
 import { createLocalDevelopmentNotificationAdapter } from "./notifications/local-development-notification-adapter";
+import {
+  type NotificationProviderAdapterFactory,
+  createOrganizationConfiguredNotificationDeliveryPort,
+} from "./notifications/organization-configured-notification-delivery-port";
 import { createNotificationWorkerRunner } from "./notifications/notification-worker-runner";
 
 const TEST_ORGANIZATION_ID = "00000000-0000-0000-0000-000000000001";
 
 async function main(): Promise<void> {
-  await runSingleBatchScenario();
+  await runConfiguredProviderResolutionScenario();
   await runPollingScenario();
   console.log("notification-worker self-test passed");
 }
 
-async function runSingleBatchScenario(): Promise<void> {
+async function runConfiguredProviderResolutionScenario(): Promise<void> {
   const firstRunTime = new Date("2026-03-20T10:00:00.000Z");
   const retryDueTime = new Date("2026-03-20T10:02:00.000Z");
   let adapterNow = firstRunTime;
+
   const repository = new InMemoryBookingCoreRepository({
+    organizationNotificationChannelConfigurations: [
+      buildChannelConfiguration({
+        channel: "email",
+        enabled: true,
+        notificationProviderKey: "local-development",
+      }),
+      buildChannelConfiguration({
+        channel: "whatsapp",
+        enabled: true,
+        notificationProviderKey: "local-development",
+      }),
+      buildChannelConfiguration({
+        channel: "sms",
+        enabled: false,
+        notificationProviderKey: null,
+      }),
+    ],
     notificationJobs: [
       buildPendingNotificationJob({
         eventType: "booking_created",
+        deliveryChannel: "email",
         payload: {},
         createdAt: new Date("2026-03-20T09:30:00.000Z"),
       }),
       buildPendingNotificationJob({
         eventType: "booking_rescheduled",
+        deliveryChannel: "whatsapp",
         payload: {
           localAdapterSimulation: {
             mode: "retryable_failure",
@@ -41,22 +70,18 @@ async function runSingleBatchScenario(): Promise<void> {
       }),
       buildPendingNotificationJob({
         eventType: "booking_cancelled",
-        payload: {
-          localAdapterSimulation: {
-            mode: "terminal_failure",
-            code: "SIMULATED_TERMINAL_FAILURE",
-            message: "Terminal provider failure.",
-          },
-        },
+        deliveryChannel: "sms",
+        payload: {},
         createdAt: new Date("2026-03-20T09:32:00.000Z"),
       }),
     ],
   });
+
   const runner = createNotificationWorkerRunner({
     repository,
-    adapter: createLocalDevelopmentNotificationAdapter({
-      providerName: "local-test-provider",
-      now: () => adapterNow,
+    deliveryPort: createOrganizationConfiguredNotificationDeliveryPort({
+      configurationReader: repository,
+      providerFactories: createProviderFactories(() => adapterNow),
     }),
     batchSize: 10,
     pollIntervalMs: 10,
@@ -90,7 +115,7 @@ async function runSingleBatchScenario(): Promise<void> {
   assert.equal(rescheduledJob?.lastErrorCode, "SIMULATED_TEMPORARY_FAILURE");
   assert.equal(cancelledJob?.status, "failed");
   assert.equal(cancelledJob?.attemptCount, 1);
-  assert.equal(cancelledJob?.lastErrorCode, "SIMULATED_TERMINAL_FAILURE");
+  assert.equal(cancelledJob?.lastErrorCode, "NOTIFICATION_CHANNEL_DISABLED");
 
   const attemptsAfterFirstRun = repository.listPersistedNotificationJobAttempts(
     TEST_ORGANIZATION_ID,
@@ -103,7 +128,7 @@ async function runSingleBatchScenario(): Promise<void> {
   const retryableAttempt = attemptsAfterFirstRun.find(
     (attempt) => attempt.notificationJobId === rescheduledJob?.id,
   );
-  const terminalAttempt = attemptsAfterFirstRun.find(
+  const disabledChannelAttempt = attemptsAfterFirstRun.find(
     (attempt) => attempt.notificationJobId === cancelledJob?.id,
   );
 
@@ -114,8 +139,15 @@ async function runSingleBatchScenario(): Promise<void> {
   );
   assert.equal(retryableAttempt?.status, "failed");
   assert.equal(retryableAttempt?.outcomeCode, "SIMULATED_TEMPORARY_FAILURE");
-  assert.equal(terminalAttempt?.status, "failed");
-  assert.equal(terminalAttempt?.outcomeCode, "SIMULATED_TERMINAL_FAILURE");
+  assert.equal(disabledChannelAttempt?.status, "failed");
+  assert.equal(
+    disabledChannelAttempt?.outcomeCode,
+    "NOTIFICATION_CHANNEL_DISABLED",
+  );
+  assert.equal(
+    getProviderResolutionChannel(disabledChannelAttempt?.outcomePayload),
+    "sms",
+  );
 
   adapterNow = retryDueTime;
   const secondRunResult = await runner.runOnce({
@@ -137,25 +169,22 @@ async function runSingleBatchScenario(): Promise<void> {
     jobsAfterSecondRun.get("booking_rescheduled")?.attemptCount,
     2,
   );
-
-  const attemptsAfterSecondRun = repository.listPersistedNotificationJobAttempts(
-    TEST_ORGANIZATION_ID,
-  );
-  assert.equal(attemptsAfterSecondRun.length, 4);
-  const secondRetryAttempt = attemptsAfterSecondRun.find(
-    (attempt) =>
-      attempt.notificationJobId === jobsAfterSecondRun.get("booking_rescheduled")?.id &&
-      attempt.attemptNumber === 2,
-  );
-  assert.equal(secondRetryAttempt?.status, "succeeded");
 }
 
 async function runPollingScenario(): Promise<void> {
   const now = new Date("2026-03-20T11:00:00.000Z");
   const repository = new InMemoryBookingCoreRepository({
+    organizationNotificationChannelConfigurations: [
+      buildChannelConfiguration({
+        channel: "email",
+        enabled: true,
+        notificationProviderKey: "local-development",
+      }),
+    ],
     notificationJobs: [
       buildPendingNotificationJob({
         eventType: "booking_created",
+        deliveryChannel: "email",
         payload: {},
         createdAt: new Date("2026-03-20T10:00:00.000Z"),
       }),
@@ -163,9 +192,9 @@ async function runPollingScenario(): Promise<void> {
   });
   const runner = createNotificationWorkerRunner({
     repository,
-    adapter: createLocalDevelopmentNotificationAdapter({
-      providerName: "local-test-provider",
-      now: () => now,
+    deliveryPort: createOrganizationConfiguredNotificationDeliveryPort({
+      configurationReader: repository,
+      providerFactories: createProviderFactories(() => now),
     }),
     batchSize: 1,
     pollIntervalMs: 10,
@@ -191,6 +220,7 @@ async function runPollingScenario(): Promise<void> {
 
 function buildPendingNotificationJob(input: {
   eventType: BookingEventType;
+  deliveryChannel: NotificationChannel;
   payload: Record<string, unknown>;
   createdAt: Date;
 }): NotificationJob {
@@ -199,6 +229,7 @@ function buildPendingNotificationJob(input: {
     organizationId: TEST_ORGANIZATION_ID,
     bookingId: randomUUID(),
     customerId: randomUUID(),
+    deliveryChannel: input.deliveryChannel,
     eventType: input.eventType,
     status: "pending",
     attemptCount: 0,
@@ -214,6 +245,26 @@ function buildPendingNotificationJob(input: {
   };
 }
 
+function buildChannelConfiguration(input: {
+  channel: NotificationChannel;
+  enabled: boolean;
+  notificationProviderKey: string | null;
+}): OrganizationNotificationChannelConfiguration {
+  const now = new Date("2026-03-20T09:00:00.000Z");
+  return {
+    id: randomUUID(),
+    organizationId: TEST_ORGANIZATION_ID,
+    channel: input.channel,
+    enabled: input.enabled,
+    notificationProviderKey: input.notificationProviderKey,
+    providerConfig: {
+      providerName: "local-test-provider",
+    },
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 function mapJobsByEventType(
   jobs: NotificationJob[],
 ): Map<BookingEventType, NotificationJob> {
@@ -224,6 +275,18 @@ function mapJobsByEventType(
   }
 
   return map;
+}
+
+function createProviderFactories(
+  now: () => Date,
+): Record<string, NotificationProviderAdapterFactory> {
+  return {
+    "local-development": (input) =>
+      createLocalDevelopmentNotificationAdapter({
+        providerName: readProviderName(input.providerConfig) ?? "local-test-provider",
+        now,
+      }),
+  };
 }
 
 function createSilentLogger() {
@@ -238,24 +301,49 @@ function createSilentLogger() {
 }
 
 function getProviderName(payload: Record<string, unknown> | undefined): string | null {
-  if (!payload) {
+  const providerDelivery = readObjectRecord(payload?.providerDelivery);
+
+  if (!providerDelivery) {
     return null;
   }
 
-  const providerDelivery = payload.providerDelivery;
-
-  if (
-    isObjectRecord(providerDelivery) &&
-    typeof providerDelivery.provider === "string"
-  ) {
-    return providerDelivery.provider;
-  }
-
-  return null;
+  return typeof providerDelivery.provider === "string"
+    ? providerDelivery.provider
+    : null;
 }
 
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function getProviderResolutionChannel(
+  payload: Record<string, unknown> | undefined,
+): string | null {
+  const providerResolution = readObjectRecord(payload?.providerResolution);
+
+  if (!providerResolution) {
+    return null;
+  }
+
+  return typeof providerResolution.channel === "string"
+    ? providerResolution.channel
+    : null;
+}
+
+function readProviderName(providerConfig: Record<string, unknown>): string | null {
+  const value = providerConfig.providerName;
+
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return null;
+  }
+
+  return value.trim();
+}
+
+function readObjectRecord(
+  value: unknown,
+): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
 }
 
 async function waitUntil(

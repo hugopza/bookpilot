@@ -1,13 +1,9 @@
 import {
   createNotificationProcessingService,
+  type NotificationDeliveryPort,
   type NotificationProcessingRepository,
   type ProcessPendingNotificationJobsResult,
 } from "@bookpilot/booking-core";
-
-import {
-  createAdapterBackedNotificationDeliveryPort,
-  type NotificationProviderAdapter,
-} from "./notification-delivery-adapter";
 
 const DEFAULT_BATCH_SIZE = 25;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
@@ -20,7 +16,7 @@ export interface NotificationWorkerLogger {
 
 export interface NotificationWorkerRunnerOptions {
   repository: NotificationProcessingRepository;
-  adapter: NotificationProviderAdapter;
+  deliveryPort: NotificationDeliveryPort;
   batchSize?: number;
   pollIntervalMs?: number;
   staleAttemptMinutes?: number;
@@ -50,7 +46,7 @@ export function createNotificationWorkerRunner(
 
   const processingService = createNotificationProcessingService(
     options.repository,
-    createAdapterBackedNotificationDeliveryPort(options.adapter),
+    options.deliveryPort,
   );
 
   let activeRun: Promise<void> | null = null;

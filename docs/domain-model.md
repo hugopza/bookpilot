@@ -484,6 +484,27 @@ This entity is useful when asynchronous delivery and retry behavior matter.
 
 ---
 
+### Organization channel/provider configuration
+
+An **organization channel/provider configuration** represents tenant-level control over which notification-capable channels are enabled and which provider key is used per channel.
+
+Examples:
+- WhatsApp notifications enabled for one organization and disabled for another
+- one organization using provider A for email while another uses provider B
+
+### Typical relationships
+
+- belongs to one organization
+- scoped to one notification-capable channel (for example: whatsapp, sms, email, push, voice)
+
+### Invariants
+
+- channel/provider configuration is organization-scoped
+- provider selection must not move booking-state decisions out of the platform
+- disabled channels should fail notification delivery operationally without corrupting booking truth
+
+---
+
 ## Key relationships summary
 
 A simplified conceptual relationship map is:

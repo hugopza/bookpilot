@@ -5,6 +5,7 @@ import { createAvailabilityService } from "./services/availability-service";
 import { createBookingManagementService } from "./services/booking-management-service";
 import {
   createAvailabilityRuleConfigurationService,
+  createNotificationChannelConfigurationService,
   createOrganizationConfigurationService,
   createServiceConfigurationService,
   createStaffMemberConfigurationService,
@@ -30,6 +31,8 @@ async function runConfigurationScenario(): Promise<void> {
   const availabilityRuleConfigurationService =
     createAvailabilityRuleConfigurationService(repository);
   const timeOffConfigurationService = createTimeOffConfigurationService(repository);
+  const notificationChannelConfigurationService =
+    createNotificationChannelConfigurationService(repository);
   const bookingService = createBookingService(repository);
   const bookingManagementService = createBookingManagementService(repository);
   const availabilityService = createAvailabilityService(repository);
@@ -117,12 +120,46 @@ async function runConfigurationScenario(): Promise<void> {
   const staffMembers = await staffMemberConfigurationService.list(organization.id);
   const rules = await availabilityRuleConfigurationService.list(organization.id);
   const timeOffs = await timeOffConfigurationService.list(organization.id);
+  const initialChannelConfigurations =
+    await notificationChannelConfigurationService.list(organization.id);
 
   assert.equal(organizations.length, 1);
   assert.equal(services.length, 1);
   assert.equal(staffMembers.length, 1);
   assert.equal(rules.length, 1);
   assert.equal(timeOffs.length, 1);
+  assert.equal(initialChannelConfigurations.length, 0);
+
+  await notificationChannelConfigurationService.upsert({
+    organizationId: organization.id,
+    channel: "email",
+    enabled: true,
+    notificationProviderKey: "local-development",
+    providerConfig: {
+      providerName: "self-test-provider",
+    },
+  });
+  await notificationChannelConfigurationService.upsert({
+    organizationId: organization.id,
+    channel: "whatsapp",
+    enabled: false,
+    providerConfig: {},
+  });
+
+  const configuredChannels = await notificationChannelConfigurationService.list(
+    organization.id,
+  );
+  const emailChannelConfiguration = await notificationChannelConfigurationService.get(
+    organization.id,
+    "email",
+  );
+
+  assert.equal(configuredChannels.length, 2);
+  assert.equal(emailChannelConfiguration?.enabled, true);
+  assert.equal(
+    emailChannelConfiguration?.notificationProviderKey,
+    "local-development",
+  );
 
   const createdBooking = await bookingService.create({
     organizationId: organization.id,
@@ -238,6 +275,9 @@ async function runConfigurationScenario(): Promise<void> {
   assert.equal(notificationJobs[0]?.eventType, "booking_created");
   assert.equal(notificationJobs[1]?.eventType, "booking_rescheduled");
   assert.equal(notificationJobs[2]?.eventType, "booking_cancelled");
+  assert.equal(notificationJobs[0]?.deliveryChannel, "email");
+  assert.equal(notificationJobs[1]?.deliveryChannel, "email");
+  assert.equal(notificationJobs[2]?.deliveryChannel, "email");
   assert.equal(notificationJobs[0]?.status, "pending");
   assert.equal(notificationJobs[1]?.status, "pending");
   assert.equal(notificationJobs[2]?.status, "pending");

@@ -2,6 +2,7 @@ import type {
   ClaimedNotificationJob,
   NotificationDeliveryPort,
   NotificationDeliveryResult,
+  NotificationChannel,
 } from "@bookpilot/booking-core";
 
 export interface NotificationProviderRequest {
@@ -9,6 +10,7 @@ export interface NotificationProviderRequest {
   organizationId: string;
   bookingId: string;
   customerId: string;
+  channel: NotificationChannel;
   eventType: ClaimedNotificationJob["job"]["eventType"];
   attemptNumber: number;
   idempotencyKey: string;
@@ -60,6 +62,7 @@ export function createAdapterBackedNotificationDeliveryPort(
               idempotencyKey: request.idempotencyKey,
               request: {
                 notificationJobId: request.notificationJobId,
+                channel: request.channel,
                 eventType: request.eventType,
                 attemptNumber: request.attemptNumber,
               },
@@ -87,6 +90,7 @@ export function createAdapterBackedNotificationDeliveryPort(
             idempotencyKey: request.idempotencyKey,
             request: {
               notificationJobId: request.notificationJobId,
+              channel: request.channel,
               eventType: request.eventType,
               attemptNumber: request.attemptNumber,
             },
@@ -112,6 +116,7 @@ function toProviderRequest(job: ClaimedNotificationJob): NotificationProviderReq
     organizationId: job.job.organizationId,
     bookingId: job.job.bookingId,
     customerId: job.job.customerId,
+    channel: job.job.deliveryChannel,
     eventType: job.job.eventType,
     attemptNumber: job.attempt.attemptNumber,
     idempotencyKey: job.attempt.processingToken,

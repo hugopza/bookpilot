@@ -8,8 +8,10 @@ import type {
   Customer,
   CustomerContactInput,
   DateRange,
+  NotificationChannel,
   NotificationJob,
   NotificationJobAttempt,
+  OrganizationNotificationChannelConfiguration,
   Organization,
   Service,
   StaffMember,
@@ -92,6 +94,7 @@ export interface BookingMutationStore extends AvailabilityRepository {
     organizationId: string;
     bookingId: string;
     customerId: string;
+    deliveryChannel: NotificationChannel;
     eventType: BookingEventType;
     payload: Record<string, unknown>;
   }): Promise<NotificationJob>;
@@ -181,4 +184,18 @@ export interface ConfigurationRepository
     endsAt: Date;
     reason: string | null;
   }): Promise<TimeOff>;
+  listOrganizationNotificationChannelConfigurations(
+    organizationId: string,
+  ): Promise<OrganizationNotificationChannelConfiguration[]>;
+  getOrganizationNotificationChannelConfiguration(
+    organizationId: string,
+    channel: NotificationChannel,
+  ): Promise<OrganizationNotificationChannelConfiguration | null>;
+  upsertOrganizationNotificationChannelConfiguration(input: {
+    organizationId: string;
+    channel: NotificationChannel;
+    enabled: boolean;
+    notificationProviderKey: string | null;
+    providerConfig: Record<string, unknown>;
+  }): Promise<OrganizationNotificationChannelConfiguration>;
 }

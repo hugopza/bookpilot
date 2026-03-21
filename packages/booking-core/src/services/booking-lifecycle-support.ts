@@ -1,4 +1,9 @@
-import type { Booking, BookingEventType, Customer } from "../domain/entities";
+import type {
+  Booking,
+  BookingEventType,
+  Customer,
+  NotificationChannel,
+} from "../domain/entities";
 import type { BookingMutationStore } from "../repositories";
 
 export async function recordBookingLifecycle(input: {
@@ -23,7 +28,18 @@ export async function recordBookingLifecycle(input: {
     organizationId: input.booking.organizationId,
     bookingId: input.booking.id,
     customerId: input.customer.id,
+    deliveryChannel: toDefaultNotificationChannel(input.booking.channelOrigin),
     eventType: input.eventType,
     payload,
   });
+}
+
+function toDefaultNotificationChannel(
+  channelOrigin: Booking["channelOrigin"],
+): NotificationChannel {
+  if (channelOrigin === "whatsapp" || channelOrigin === "voice") {
+    return channelOrigin;
+  }
+
+  return "email";
 }

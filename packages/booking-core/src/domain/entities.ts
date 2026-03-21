@@ -16,6 +16,13 @@ export type NotificationJobAttemptStatus =
   | "succeeded"
   | "failed";
 
+export type NotificationChannel =
+  | "whatsapp"
+  | "sms"
+  | "email"
+  | "push"
+  | "voice";
+
 export type BookingChannelOrigin =
   | "api"
   | "web"
@@ -100,6 +107,7 @@ export interface NotificationJob {
   organizationId: string;
   bookingId: string;
   customerId: string;
+  deliveryChannel: NotificationChannel;
   eventType: BookingEventType;
   status: NotificationJobStatus;
   attemptCount: number;
@@ -110,6 +118,17 @@ export interface NotificationJob {
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
   payload: Record<string, unknown>;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface OrganizationNotificationChannelConfiguration {
+  id: string;
+  organizationId: string;
+  channel: NotificationChannel;
+  enabled: boolean;
+  notificationProviderKey: string | null;
+  providerConfig: Record<string, unknown>;
   createdAt: Date;
   updatedAt: Date;
 }

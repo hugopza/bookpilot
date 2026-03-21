@@ -9,8 +9,10 @@ import type {
   Customer,
   CustomerContactInput,
   DateRange,
+  NotificationChannel,
   NotificationJob,
   NotificationJobAttempt,
+  OrganizationNotificationChannelConfiguration,
   Organization,
   Service,
   StaffMember,
@@ -37,6 +39,7 @@ interface SeedData {
   bookingEvents?: BookingEvent[];
   notificationJobs?: NotificationJob[];
   notificationJobAttempts?: NotificationJobAttempt[];
+  organizationNotificationChannelConfigurations?: OrganizationNotificationChannelConfiguration[];
 }
 
 export class InMemoryBookingCoreRepository
@@ -56,6 +59,10 @@ export class InMemoryBookingCoreRepository
   private readonly bookingEvents = new Map<string, BookingEvent>();
   private readonly notificationJobs = new Map<string, NotificationJob>();
   private readonly notificationJobAttempts = new Map<string, NotificationJobAttempt>();
+  private readonly organizationNotificationChannelConfigurations = new Map<
+    string,
+    OrganizationNotificationChannelConfiguration
+  >();
 
   constructor(seedData: SeedData = {}) {
     seedData.organizations?.forEach((organization) =>
@@ -83,6 +90,15 @@ export class InMemoryBookingCoreRepository
       this.notificationJobAttempts.set(
         notificationJobAttempt.id,
         notificationJobAttempt,
+      ),
+    );
+    seedData.organizationNotificationChannelConfigurations?.forEach((configuration) =>
+      this.organizationNotificationChannelConfigurations.set(
+        this.toNotificationChannelConfigurationKey(
+          configuration.organizationId,
+          configuration.channel,
+        ),
+        configuration,
       ),
     );
   }
@@ -197,6 +213,53 @@ export class InMemoryBookingCoreRepository
     return [...this.timeOffs.values()]
       .filter((timeOff) => timeOff.organizationId === organizationId)
       .sort((left, right) => left.startsAt.getTime() - right.startsAt.getTime());
+  }
+
+  async listOrganizationNotificationChannelConfigurations(
+    organizationId: string,
+  ): Promise<OrganizationNotificationChannelConfiguration[]> {
+    return [...this.organizationNotificationChannelConfigurations.values()]
+      .filter((configuration) => configuration.organizationId === organizationId)
+      .sort((left, right) => left.channel.localeCompare(right.channel));
+  }
+
+  async getOrganizationNotificationChannelConfiguration(
+    organizationId: string,
+    channel: NotificationChannel,
+  ): Promise<OrganizationNotificationChannelConfiguration | null> {
+    return (
+      this.organizationNotificationChannelConfigurations.get(
+        this.toNotificationChannelConfigurationKey(organizationId, channel),
+      ) ?? null
+    );
+  }
+
+  async upsertOrganizationNotificationChannelConfiguration(input: {
+    organizationId: string;
+    channel: NotificationChannel;
+    enabled: boolean;
+    notificationProviderKey: string | null;
+    providerConfig: Record<string, unknown>;
+  }): Promise<OrganizationNotificationChannelConfiguration> {
+    const key = this.toNotificationChannelConfigurationKey(
+      input.organizationId,
+      input.channel,
+    );
+    const existing = this.organizationNotificationChannelConfigurations.get(key);
+    const now = new Date();
+    const configuration: OrganizationNotificationChannelConfiguration = {
+      id: existing?.id ?? randomUUID(),
+      organizationId: input.organizationId,
+      channel: input.channel,
+      enabled: input.enabled,
+      notificationProviderKey: input.notificationProviderKey,
+      providerConfig: input.providerConfig,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+
+    this.organizationNotificationChannelConfigurations.set(key, configuration);
+    return configuration;
   }
 
   async listBookings(
@@ -537,6 +600,7 @@ export class InMemoryBookingCoreRepository
     organizationId: string;
     bookingId: string;
     customerId: string;
+    deliveryChannel: NotificationChannel;
     eventType: BookingEventType;
     payload: Record<string, unknown>;
   }): Promise<NotificationJob> {
@@ -546,6 +610,7 @@ export class InMemoryBookingCoreRepository
       organizationId: input.organizationId,
       bookingId: input.bookingId,
       customerId: input.customerId,
+      deliveryChannel: input.deliveryChannel,
       eventType: input.eventType,
       status: "pending",
       attemptCount: 0,
@@ -760,6 +825,13 @@ export class InMemoryBookingCoreRepository
         (attempt) => attempt.processingToken === processingToken,
       ) ?? null
     );
+  }
+
+  private toNotificationChannelConfigurationKey(
+    organizationId: string,
+    channel: NotificationChannel,
+  ): string {
+    return `${organizationId}:${channel}`;
   }
 }
 

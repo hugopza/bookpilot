@@ -1,6 +1,8 @@
 import type {
   AvailabilityRule,
+  NotificationChannel,
   Organization,
+  OrganizationNotificationChannelConfiguration,
   Service,
   StaffMember,
   TimeOff,
@@ -44,6 +46,14 @@ export interface CreateTimeOffInput {
   startsAt: string;
   endsAt: string;
   reason?: string | null;
+}
+
+export interface UpsertOrganizationNotificationChannelConfigurationInput {
+  organizationId: string;
+  channel: NotificationChannel;
+  enabled: boolean;
+  notificationProviderKey?: string | null;
+  providerConfig?: Record<string, unknown>;
 }
 
 export function createOrganizationConfigurationService(
@@ -190,6 +200,59 @@ export function createTimeOffConfigurationService(
   };
 }
 
+export function createNotificationChannelConfigurationService(
+  repository: ConfigurationRepository,
+) {
+  return {
+    async list(
+      organizationId: string,
+    ): Promise<OrganizationNotificationChannelConfiguration[]> {
+      await requireOrganization(repository, organizationId);
+      return repository.listOrganizationNotificationChannelConfigurations(
+        organizationId,
+      );
+    },
+
+    async get(
+      organizationId: string,
+      channel: NotificationChannel,
+    ): Promise<OrganizationNotificationChannelConfiguration | null> {
+      await requireOrganization(repository, organizationId);
+      assertValidNotificationChannel(channel);
+      return repository.getOrganizationNotificationChannelConfiguration(
+        organizationId,
+        channel,
+      );
+    },
+
+    async upsert(
+      input: UpsertOrganizationNotificationChannelConfigurationInput,
+    ): Promise<OrganizationNotificationChannelConfiguration> {
+      await requireOrganization(repository, input.organizationId);
+      assertValidNotificationChannel(input.channel);
+
+      const notificationProviderKey = normalizeOptionalString(
+        input.notificationProviderKey,
+      );
+      const providerConfig = requireRecord(input.providerConfig ?? {}, "providerConfig");
+
+      if (input.enabled && !notificationProviderKey) {
+        throw new ValidationError(
+          "notificationProviderKey is required when the channel is enabled.",
+        );
+      }
+
+      return repository.upsertOrganizationNotificationChannelConfiguration({
+        organizationId: input.organizationId,
+        channel: input.channel,
+        enabled: input.enabled,
+        notificationProviderKey,
+        providerConfig,
+      });
+    },
+  };
+}
+
 async function requireOrganization(
   repository: ConfigurationRepository,
   organizationId: string,
@@ -289,4 +352,29 @@ function parseTimeToSeconds(value: string, fieldName: string): number {
   }
 
   return hours * 3600 + minutes * 60 + seconds;
+}
+
+function requireRecord(
+  value: unknown,
+  fieldName: string,
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ValidationError(`${fieldName} must be an object.`);
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function assertValidNotificationChannel(channel: NotificationChannel): void {
+  const validChannels: NotificationChannel[] = [
+    "whatsapp",
+    "sms",
+    "email",
+    "push",
+    "voice",
+  ];
+
+  if (!validChannels.includes(channel)) {
+    throw new ValidationError("channel is invalid.");
+  }
 }

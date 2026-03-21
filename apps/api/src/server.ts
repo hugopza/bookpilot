@@ -5,7 +5,9 @@ import {
   ConflictError,
   createAvailabilityRuleConfigurationService,
   createBookingManagementService,
+  createNotificationChannelConfigurationService,
   type CreateBookingInput,
+  type NotificationChannel,
   createOrganizationConfigurationService,
   createServiceConfigurationService,
   createStaffMemberConfigurationService,
@@ -43,6 +45,8 @@ const staffMemberConfigurationService =
 const availabilityRuleConfigurationService =
   createAvailabilityRuleConfigurationService(repository);
 const timeOffConfigurationService = createTimeOffConfigurationService(repository);
+const notificationChannelConfigurationService =
+  createNotificationChannelConfigurationService(repository);
 const port = Number(process.env.PORT ?? "3001");
 
 const server = createServer(async (request, response) => {
@@ -156,6 +160,52 @@ const server = createServer(async (request, response) => {
       if (request.method === "GET" && resource === "bookings") {
         const result = await bookingManagementService.list(
           asListBookingsInput(url.searchParams, organizationId),
+        );
+        writeJson(response, 200, result);
+        return;
+      }
+
+      if (
+        request.method === "GET" &&
+        resource === "notification-channel-configurations"
+      ) {
+        const result = await notificationChannelConfigurationService.list(
+          organizationId,
+        );
+        writeJson(response, 200, result);
+        return;
+      }
+    }
+
+    const notificationChannelConfigurationAction =
+      matchOrganizationNotificationChannelConfigurationAction(pathname);
+
+    if (notificationChannelConfigurationAction) {
+      const { organizationId, channel } = notificationChannelConfigurationAction;
+
+      if (request.method === "GET") {
+        const result = await notificationChannelConfigurationService.get(
+          organizationId,
+          channel,
+        );
+
+        if (!result) {
+          writeJson(response, 404, { error: "Not found" });
+          return;
+        }
+
+        writeJson(response, 200, result);
+        return;
+      }
+
+      if (request.method === "PUT") {
+        const payload = await readJsonBody(request);
+        const result = await notificationChannelConfigurationService.upsert(
+          asUpsertNotificationChannelConfigurationInput(
+            payload,
+            organizationId,
+            channel,
+          ),
         );
         writeJson(response, 200, result);
         return;
@@ -427,10 +477,44 @@ function asRescheduleBookingInput(
   };
 }
 
+function asUpsertNotificationChannelConfigurationInput(
+  value: unknown,
+  organizationId: string,
+  channel: NotificationChannel,
+): {
+  organizationId: string;
+  channel: NotificationChannel;
+  enabled: boolean;
+  notificationProviderKey?: string | null;
+  providerConfig?: Record<string, unknown>;
+} {
+  const record = asRecord(value);
+
+  return {
+    organizationId,
+    channel,
+    enabled: readRequiredBoolean(record, "enabled"),
+    notificationProviderKey:
+      readOptionalString(record, "notificationProviderKey") ?? null,
+    providerConfig:
+      record.providerConfig === undefined
+        ? undefined
+        : readRecord(record.providerConfig, "providerConfig"),
+  };
+}
+
 function asRecord(
   value: unknown,
   fieldName = "request body",
 ): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ValidationError(`${fieldName} must be a JSON object.`);
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function readRecord(value: unknown, fieldName: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new ValidationError(`${fieldName} must be a JSON object.`);
   }
@@ -515,6 +599,19 @@ function readOptionalBoolean(
   return value;
 }
 
+function readRequiredBoolean(
+  record: Record<string, unknown>,
+  fieldName: string,
+): boolean {
+  const value = record[fieldName];
+
+  if (typeof value !== "boolean") {
+    throw new ValidationError(`${fieldName} must be a boolean.`);
+  }
+
+  return value;
+}
+
 function readOptionalChannelOrigin(
   value: unknown,
 ): CreateBookingInput["channelOrigin"] {
@@ -571,5 +668,36 @@ function matchBookingAction(
     organizationId: segments[1] ?? "",
     bookingId: segments[3] ?? "",
     action: segments[4] ?? "",
+  };
+}
+
+function matchOrganizationNotificationChannelConfigurationAction(
+  pathname: string,
+): { organizationId: string; channel: NotificationChannel } | null {
+  const segments = pathname.split("/").filter(Boolean);
+
+  if (
+    segments.length !== 4 ||
+    segments[0] !== "organizations" ||
+    segments[2] !== "notification-channel-configurations"
+  ) {
+    return null;
+  }
+
+  const channel = segments[3];
+
+  if (
+    channel !== "whatsapp" &&
+    channel !== "sms" &&
+    channel !== "email" &&
+    channel !== "push" &&
+    channel !== "voice"
+  ) {
+    throw new ValidationError("channel is invalid.");
+  }
+
+  return {
+    organizationId: segments[1] ?? "",
+    channel,
   };
 }

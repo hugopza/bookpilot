@@ -1,7 +1,9 @@
 import { Pool } from "pg";
 
+import type { NotificationProviderAdapterFactory } from "./notifications/organization-configured-notification-delivery-port";
 import { PostgresBookingCoreRepository } from "./postgres-booking-core-repository";
 import { createLocalDevelopmentNotificationAdapter } from "./notifications/local-development-notification-adapter";
+import { createOrganizationConfiguredNotificationDeliveryPort } from "./notifications/organization-configured-notification-delivery-port";
 import { createNotificationWorkerRunner } from "./notifications/notification-worker-runner";
 
 const DEFAULT_BATCH_SIZE = 25;
@@ -27,20 +29,27 @@ async function main(): Promise<void> {
     "NOTIFICATION_WORKER_STALE_ATTEMPT_MINUTES",
     DEFAULT_STALE_ATTEMPT_MINUTES,
   );
-  const providerName =
+  const providerNameFallback =
     process.env.NOTIFICATION_PROVIDER_NAME ?? "local-development-provider";
 
   const pool = new Pool({
     connectionString: databaseUrl,
   });
   const repository = new PostgresBookingCoreRepository(pool);
-  const adapter = createLocalDevelopmentNotificationAdapter({
-    providerName,
+  const providerFactories: Record<string, NotificationProviderAdapterFactory> = {
+    "local-development": (input) =>
+      createLocalDevelopmentNotificationAdapter({
+        providerName: readOptionalProviderName(input.providerConfig) ?? providerNameFallback,
+      }),
+  };
+  const deliveryPort = createOrganizationConfiguredNotificationDeliveryPort({
+    configurationReader: repository,
+    providerFactories,
   });
 
   const runner = createNotificationWorkerRunner({
     repository,
-    adapter,
+    deliveryPort,
     batchSize,
     pollIntervalMs,
     staleAttemptMinutes,
@@ -51,7 +60,8 @@ async function main(): Promise<void> {
     batchSize,
     pollIntervalMs,
     staleAttemptMinutes,
-    providerName,
+    providerRegistryKeys: Object.keys(providerFactories),
+    providerNameFallback,
   });
 
   let shuttingDown = false;
@@ -100,3 +110,10 @@ void main().catch((error: unknown) => {
   console.error("Notification worker failed to start.", error);
   process.exitCode = 1;
 });
+
+function readOptionalProviderName(
+  providerConfig: Record<string, unknown>,
+): string | null {
+  const value = providerConfig.providerName;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
