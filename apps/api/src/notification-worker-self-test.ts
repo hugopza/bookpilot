@@ -8,18 +8,18 @@ import type {
   OrganizationNotificationChannelConfiguration,
 } from "@bookpilot/booking-core";
 import { InMemoryBookingCoreRepository } from "@bookpilot/booking-core";
-
-import { createLocalDevelopmentNotificationAdapter } from "./notifications/local-development-notification-adapter";
 import {
-  type NotificationProviderAdapterFactory,
   createOrganizationConfiguredNotificationDeliveryPort,
 } from "./notifications/organization-configured-notification-delivery-port";
+import { createEnvironmentNotificationProviderCredentialsResolver } from "./notifications/provider-credentials-resolver";
+import { createNotificationProviderFactories } from "./notifications/provider-factory-registry";
 import { createNotificationWorkerRunner } from "./notifications/notification-worker-runner";
 
 const TEST_ORGANIZATION_ID = "00000000-0000-0000-0000-000000000001";
 
 async function main(): Promise<void> {
   await runConfiguredProviderResolutionScenario();
+  await runResendEmailProviderScenario();
   await runPollingScenario();
   console.log("notification-worker self-test passed");
 }
@@ -27,7 +27,6 @@ async function main(): Promise<void> {
 async function runConfiguredProviderResolutionScenario(): Promise<void> {
   const firstRunTime = new Date("2026-03-20T10:00:00.000Z");
   const retryDueTime = new Date("2026-03-20T10:02:00.000Z");
-  let adapterNow = firstRunTime;
 
   const repository = new InMemoryBookingCoreRepository({
     organizationNotificationChannelConfigurations: [
@@ -81,7 +80,12 @@ async function runConfiguredProviderResolutionScenario(): Promise<void> {
     repository,
     deliveryPort: createOrganizationConfiguredNotificationDeliveryPort({
       configurationReader: repository,
-      providerFactories: createProviderFactories(() => adapterNow),
+      providerFactories: createNotificationProviderFactories({
+        credentialsResolver: createEnvironmentNotificationProviderCredentialsResolver(
+          { env: {} },
+        ),
+        localDevelopmentProviderNameFallback: "local-test-provider",
+      }),
     }),
     batchSize: 10,
     pollIntervalMs: 10,
@@ -149,7 +153,6 @@ async function runConfiguredProviderResolutionScenario(): Promise<void> {
     "sms",
   );
 
-  adapterNow = retryDueTime;
   const secondRunResult = await runner.runOnce({
     now: retryDueTime,
   });
@@ -194,7 +197,12 @@ async function runPollingScenario(): Promise<void> {
     repository,
     deliveryPort: createOrganizationConfiguredNotificationDeliveryPort({
       configurationReader: repository,
-      providerFactories: createProviderFactories(() => now),
+      providerFactories: createNotificationProviderFactories({
+        credentialsResolver: createEnvironmentNotificationProviderCredentialsResolver(
+          { env: {} },
+        ),
+        localDevelopmentProviderNameFallback: "local-test-provider",
+      }),
     }),
     batchSize: 1,
     pollIntervalMs: 10,
@@ -216,6 +224,133 @@ async function runPollingScenario(): Promise<void> {
   );
   assert.equal(attempts.length, 1);
   assert.equal(attempts[0]?.status, "succeeded");
+}
+
+async function runResendEmailProviderScenario(): Promise<void> {
+  const now = new Date("2026-03-20T12:00:00.000Z");
+  const repository = new InMemoryBookingCoreRepository({
+    organizationNotificationChannelConfigurations: [
+      {
+        id: randomUUID(),
+        organizationId: TEST_ORGANIZATION_ID,
+        channel: "email",
+        enabled: true,
+        notificationProviderKey: "resend-email",
+        providerConfig: {
+          credentialRef: "org_main_email",
+          fromEmail: "noreply@example.com",
+          subjectPrefix: "[BookPilot]",
+        },
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: randomUUID(),
+        organizationId: "00000000-0000-0000-0000-000000000002",
+        channel: "email",
+        enabled: true,
+        notificationProviderKey: "resend-email",
+        providerConfig: {
+          credentialRef: "missing_credentials_ref",
+          fromEmail: "noreply@example.com",
+        },
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    notificationJobs: [
+      buildPendingNotificationJob({
+        eventType: "booking_created",
+        deliveryChannel: "email",
+        payload: {
+          customerEmail: "customer1@example.com",
+        },
+        createdAt: now,
+      }),
+      {
+        ...buildPendingNotificationJob({
+          eventType: "booking_cancelled",
+          deliveryChannel: "email",
+          payload: {
+            customerEmail: "customer2@example.com",
+          },
+          createdAt: now,
+        }),
+        organizationId: "00000000-0000-0000-0000-000000000002",
+      },
+    ],
+  });
+
+  const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+  const fetchImplementation: typeof fetch = async (url, init) => {
+    fetchCalls.push({ url: String(url), init: init ?? {} });
+
+    return new Response(
+      JSON.stringify({
+        id: "resend_test_123",
+      }),
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      },
+    );
+  };
+
+  const runner = createNotificationWorkerRunner({
+    repository,
+    deliveryPort: createOrganizationConfiguredNotificationDeliveryPort({
+      configurationReader: repository,
+      providerFactories: createNotificationProviderFactories({
+        credentialsResolver: createEnvironmentNotificationProviderCredentialsResolver({
+          env: {
+            NOTIFICATION_PROVIDER_CREDENTIALS_JSON: JSON.stringify({
+              org_main_email: {
+                apiKey: "resend_test_api_key",
+              },
+            }),
+          },
+        }),
+        localDevelopmentProviderNameFallback: "local-test-provider",
+        resendFetchImplementation: fetchImplementation,
+      }),
+    }),
+    batchSize: 10,
+    pollIntervalMs: 10,
+    staleAttemptMinutes: 15,
+    logger: createSilentLogger(),
+  });
+
+  const result = await runner.runOnce({
+    now,
+  });
+
+  assert.deepEqual(result, {
+    claimedJobs: 2,
+    succeededJobs: 1,
+    failedJobs: 1,
+    retriedJobs: 0,
+  });
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0]?.url, "https://api.resend.com/emails");
+
+  const firstOrgAttempts = repository.listPersistedNotificationJobAttempts(
+    TEST_ORGANIZATION_ID,
+  );
+  assert.equal(firstOrgAttempts.length, 1);
+  assert.equal(firstOrgAttempts[0]?.status, "succeeded");
+  assert.equal(
+    getProviderName(firstOrgAttempts[0]?.outcomePayload),
+    "resend-email",
+  );
+
+  const secondOrgAttempts = repository.listPersistedNotificationJobAttempts(
+    "00000000-0000-0000-0000-000000000002",
+  );
+  assert.equal(secondOrgAttempts.length, 1);
+  assert.equal(secondOrgAttempts[0]?.status, "failed");
+  assert.equal(secondOrgAttempts[0]?.outcomeCode, "PROVIDER_CREDENTIALS_NOT_FOUND");
 }
 
 function buildPendingNotificationJob(input: {
@@ -277,18 +412,6 @@ function mapJobsByEventType(
   return map;
 }
 
-function createProviderFactories(
-  now: () => Date,
-): Record<string, NotificationProviderAdapterFactory> {
-  return {
-    "local-development": (input) =>
-      createLocalDevelopmentNotificationAdapter({
-        providerName: readProviderName(input.providerConfig) ?? "local-test-provider",
-        now,
-      }),
-  };
-}
-
 function createSilentLogger() {
   return {
     info() {
@@ -324,16 +447,6 @@ function getProviderResolutionChannel(
   return typeof providerResolution.channel === "string"
     ? providerResolution.channel
     : null;
-}
-
-function readProviderName(providerConfig: Record<string, unknown>): string | null {
-  const value = providerConfig.providerName;
-
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return null;
-  }
-
-  return value.trim();
 }
 
 function readObjectRecord(

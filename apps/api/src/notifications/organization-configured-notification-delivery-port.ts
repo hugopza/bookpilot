@@ -20,7 +20,7 @@ export interface NotificationProviderAdapterFactoryInput {
 
 export type NotificationProviderAdapterFactory = (
   input: NotificationProviderAdapterFactoryInput,
-) => NotificationProviderAdapter;
+) => Promise<NotificationProviderAdapter> | NotificationProviderAdapter;
 
 export interface OrganizationNotificationChannelConfigurationReader {
   getOrganizationNotificationChannelConfiguration(
@@ -37,7 +37,7 @@ export interface OrganizationConfiguredNotificationDeliveryPortOptions {
 export function createOrganizationConfiguredNotificationDeliveryPort(
   options: OrganizationConfiguredNotificationDeliveryPortOptions,
 ): NotificationDeliveryPort {
-  const adapterCache = new Map<string, NotificationProviderAdapter>();
+  const adapterCache = new Map<string, Promise<NotificationProviderAdapter>>();
 
   return {
     async deliver(job: ClaimedNotificationJob): Promise<NotificationDeliveryResult> {
@@ -84,36 +84,49 @@ export function createOrganizationConfiguredNotificationDeliveryPort(
         );
       }
 
-      const adapter = getCachedAdapter(
+      const adapter = await getCachedAdapter(
         adapterCache,
         configuration,
         providerFactory,
+      ).catch((error: unknown) =>
+        toProviderSetupFailureResult(error, channel, configuration.notificationProviderKey),
       );
+
+      if (isNotificationDeliveryResult(adapter)) {
+        return adapter;
+      }
+
       const deliveryPort = createAdapterBackedNotificationDeliveryPort(adapter);
       return deliveryPort.deliver(job);
     },
   };
 }
 
-function getCachedAdapter(
-  cache: Map<string, NotificationProviderAdapter>,
+async function getCachedAdapter(
+  cache: Map<string, Promise<NotificationProviderAdapter>>,
   configuration: OrganizationNotificationChannelConfiguration,
   factory: NotificationProviderAdapterFactory,
-): NotificationProviderAdapter {
-  const cacheKey = `${configuration.organizationId}:${configuration.channel}:${configuration.notificationProviderKey}`;
+): Promise<NotificationProviderAdapter> {
+  const cacheKey = `${configuration.organizationId}:${configuration.channel}:${configuration.notificationProviderKey}:${configuration.updatedAt.getTime()}`;
   const cached = cache.get(cacheKey);
 
   if (cached) {
     return cached;
   }
 
-  const created = factory({
-    organizationId: configuration.organizationId,
-    channel: configuration.channel,
-    providerKey: configuration.notificationProviderKey ?? "",
-    providerConfig: configuration.providerConfig,
+  const created = Promise.resolve(
+    factory({
+      organizationId: configuration.organizationId,
+      channel: configuration.channel,
+      providerKey: configuration.notificationProviderKey ?? "",
+      providerConfig: configuration.providerConfig,
+    }),
+  ).catch((error: unknown) => {
+    cache.delete(cacheKey);
+    throw error;
   });
   cache.set(cacheKey, created);
+
   return created;
 }
 
@@ -135,4 +148,54 @@ function failureResult(
       },
     },
   };
+}
+
+function toProviderSetupFailureResult(
+  error: unknown,
+  channel: NotificationChannel,
+  providerKey: string | null,
+): NotificationDeliveryResult {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    "message" in error &&
+    typeof error.message === "string" &&
+    "retryable" in error &&
+    typeof error.retryable === "boolean"
+  ) {
+    return {
+      outcome: "failed",
+      retryable: error.retryable,
+      code: error.code,
+      message: error.message,
+      payload: {
+        providerResolution: {
+          channel,
+          providerKey,
+        },
+      },
+    };
+  }
+
+  return failureResult(
+    "NOTIFICATION_PROVIDER_SETUP_ERROR",
+    error instanceof Error
+      ? error.message
+      : "Failed to initialize notification provider adapter.",
+    channel,
+    providerKey ?? undefined,
+  );
+}
+
+function isNotificationDeliveryResult(
+  value: unknown,
+): value is NotificationDeliveryResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "outcome" in value &&
+    (value.outcome === "succeeded" || value.outcome === "failed")
+  );
 }

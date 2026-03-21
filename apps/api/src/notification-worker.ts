@@ -1,9 +1,9 @@
 import { Pool } from "pg";
 
-import type { NotificationProviderAdapterFactory } from "./notifications/organization-configured-notification-delivery-port";
 import { PostgresBookingCoreRepository } from "./postgres-booking-core-repository";
-import { createLocalDevelopmentNotificationAdapter } from "./notifications/local-development-notification-adapter";
 import { createOrganizationConfiguredNotificationDeliveryPort } from "./notifications/organization-configured-notification-delivery-port";
+import { createEnvironmentNotificationProviderCredentialsResolver } from "./notifications/provider-credentials-resolver";
+import { createNotificationProviderFactories } from "./notifications/provider-factory-registry";
 import { createNotificationWorkerRunner } from "./notifications/notification-worker-runner";
 
 const DEFAULT_BATCH_SIZE = 25;
@@ -36,12 +36,12 @@ async function main(): Promise<void> {
     connectionString: databaseUrl,
   });
   const repository = new PostgresBookingCoreRepository(pool);
-  const providerFactories: Record<string, NotificationProviderAdapterFactory> = {
-    "local-development": (input) =>
-      createLocalDevelopmentNotificationAdapter({
-        providerName: readOptionalProviderName(input.providerConfig) ?? providerNameFallback,
-      }),
-  };
+  const credentialsResolver =
+    createEnvironmentNotificationProviderCredentialsResolver();
+  const providerFactories = createNotificationProviderFactories({
+    credentialsResolver,
+    localDevelopmentProviderNameFallback: providerNameFallback,
+  });
   const deliveryPort = createOrganizationConfiguredNotificationDeliveryPort({
     configurationReader: repository,
     providerFactories,
@@ -110,10 +110,3 @@ void main().catch((error: unknown) => {
   console.error("Notification worker failed to start.", error);
   process.exitCode = 1;
 });
-
-function readOptionalProviderName(
-  providerConfig: Record<string, unknown>,
-): string | null {
-  const value = providerConfig.providerName;
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}

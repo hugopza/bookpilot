@@ -301,12 +301,15 @@ Notification delivery may happen through:
 - deliver outbound notifications
 - report delivery outcomes when supported
 - support retry handling where useful
+- resolve provider credentials through secure internal resolution, not hardcoded global credentials
 
 ### Limits
 
 Notification systems must not become the canonical record of whether the booking exists or what its final state is.
 
 A failed reminder delivery is a notification problem, not a booking-state problem.
+
+Provider credentials should be referenced through organization-scoped configuration (for example via credential references) and resolved in internal worker/integration infrastructure, not stored as raw secrets in canonical booking entities.
 
 ---
 
