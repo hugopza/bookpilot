@@ -370,6 +370,26 @@ Examples:
 
 ---
 
+## Workflow: internal API token lifecycle
+
+### Goal
+
+Allow internal operators to safely manage internal API access without direct SQL.
+
+### Canonical flow
+
+1. an authenticated internal actor requests token issue, rotate, revoke, or list
+2. the platform validates actor role and tenant scope
+3. token lifecycle action is executed in canonical Postgres state
+4. raw token material is returned only on issue/rotate and never persisted plaintext
+5. audit fields such as active state, expiration, and last-used timestamp remain queryable for operations
+
+### Important rule
+
+Token lifecycle management is an internal access-control workflow and must not alter booking-domain business logic.
+
+---
+
 ## Workflow responsibilities by layer
 
 ### Channels

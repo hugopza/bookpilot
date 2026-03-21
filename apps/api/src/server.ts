@@ -24,9 +24,13 @@ import { Pool } from "pg";
 
 import {
   InternalApiForbiddenError,
+  InternalApiNotFoundError,
   InternalApiUnauthorizedError,
+  InternalApiValidationError,
+  type InternalApiRole,
   PostgresInternalApiAuthRepository,
   createInternalApiAuthService,
+  createInternalApiTokenLifecycleService,
 } from "./internal-auth";
 import { PostgresBookingCoreRepository } from "./postgres-booking-core-repository";
 import {
@@ -44,8 +48,12 @@ const pool = new Pool({
   connectionString: databaseUrl,
 });
 const repository = new PostgresBookingCoreRepository(pool);
+const internalApiAuthRepository = new PostgresInternalApiAuthRepository(pool);
 const internalApiAuthService = createInternalApiAuthService(
-  new PostgresInternalApiAuthRepository(pool),
+  internalApiAuthRepository,
+);
+const internalApiTokenLifecycleService = createInternalApiTokenLifecycleService(
+  internalApiAuthRepository,
 );
 
 const availabilityService = createAvailabilityService(repository);
@@ -102,6 +110,50 @@ const server = createServer(async (request, response) => {
     }
 
     const principal = await internalApiAuthService.authenticateRequest(request);
+
+    if (request.method === "GET" && pathname === "/internal/auth/tokens") {
+      const result = await internalApiTokenLifecycleService.list({
+        actor: principal,
+        ...asListInternalApiTokensInput(url.searchParams),
+      });
+      writeJson(response, 200, result);
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/internal/auth/tokens/issue") {
+      const payload = await readJsonBody(request);
+      const result = await internalApiTokenLifecycleService.issue({
+        actor: principal,
+        ...asIssueInternalApiTokenInput(payload),
+      });
+      writeJson(response, 201, result);
+      return;
+    }
+
+    const internalAuthTokenAction = matchInternalAuthTokenAction(pathname);
+
+    if (internalAuthTokenAction && request.method === "POST") {
+      const payload = await readJsonBody(request);
+
+      if (internalAuthTokenAction.action === "rotate") {
+        const result = await internalApiTokenLifecycleService.rotate({
+          actor: principal,
+          tokenId: internalAuthTokenAction.tokenId,
+          ...asRotateInternalApiTokenInput(payload),
+        });
+        writeJson(response, 200, result);
+        return;
+      }
+
+      if (internalAuthTokenAction.action === "revoke") {
+        const result = await internalApiTokenLifecycleService.revoke({
+          actor: principal,
+          tokenId: internalAuthTokenAction.tokenId,
+        });
+        writeJson(response, 200, result);
+        return;
+      }
+    }
 
     if (request.method === "GET" && pathname === "/organizations") {
       internalApiAuthService.assertPlatformAdmin(principal);
@@ -368,6 +420,16 @@ function writeJson(
 }
 
 function handleError(response: ServerResponse, error: unknown): void {
+  if (error instanceof InternalApiValidationError) {
+    writeJson(response, 400, { error: error.message, code: error.code });
+    return;
+  }
+
+  if (error instanceof InternalApiNotFoundError) {
+    writeJson(response, 404, { error: error.message, code: error.code });
+    return;
+  }
+
   if (error instanceof InternalApiUnauthorizedError) {
     writeJson(response, 401, { error: error.message, code: error.code });
     return;
@@ -626,6 +688,99 @@ function asListNotificationJobsInput(
   };
 }
 
+function asListInternalApiTokensInput(
+  searchParams: URLSearchParams,
+): {
+  organizationId?: string;
+  role?: InternalApiRole;
+  active?: boolean;
+  limit?: number;
+} {
+  const role = searchParams.get("role");
+
+  if (
+    role !== null &&
+    role !== "platform_admin" &&
+    role !== "organization_operator"
+  ) {
+    throw new ValidationError("role is invalid.");
+  }
+
+  const activeText = searchParams.get("active");
+  let active: boolean | undefined;
+
+  if (activeText !== null) {
+    if (activeText !== "true" && activeText !== "false") {
+      throw new ValidationError("active must be true or false.");
+    }
+
+    active = activeText === "true";
+  }
+
+  const limitText = searchParams.get("limit");
+  let limit: number | undefined;
+
+  if (limitText !== null) {
+    const parsedLimit = Number.parseInt(limitText, 10);
+
+    if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
+      throw new ValidationError("limit must be a positive integer.");
+    }
+
+    limit = parsedLimit;
+  }
+
+  return {
+    organizationId: searchParams.get("organizationId") ?? undefined,
+    role: role ?? undefined,
+    active,
+    limit,
+  };
+}
+
+function asIssueInternalApiTokenInput(value: unknown): {
+  role: InternalApiRole;
+  organizationId?: string | null;
+  description?: string | null;
+  expiresAt?: string | null;
+} {
+  const record = asRecord(value);
+  const role = readRequiredString(record, "role");
+
+  if (role !== "platform_admin" && role !== "organization_operator") {
+    throw new ValidationError("role is invalid.");
+  }
+
+  return {
+    role,
+    organizationId: record.organizationId === undefined
+      ? undefined
+      : readNullableString(record, "organizationId"),
+    description: record.description === undefined
+      ? undefined
+      : readNullableString(record, "description"),
+    expiresAt: record.expiresAt === undefined
+      ? undefined
+      : readNullableString(record, "expiresAt"),
+  };
+}
+
+function asRotateInternalApiTokenInput(value: unknown): {
+  description?: string | null;
+  expiresAt?: string | null;
+} {
+  const record = asRecord(value);
+
+  return {
+    description: record.description === undefined
+      ? undefined
+      : readNullableString(record, "description"),
+    expiresAt: record.expiresAt === undefined
+      ? undefined
+      : readNullableString(record, "expiresAt"),
+  };
+}
+
 function asRescheduleBookingInput(
   value: unknown,
   organizationId: string,
@@ -716,6 +871,23 @@ function readOptionalString(
 
   if (typeof value !== "string") {
     throw new ValidationError(`${fieldName} must be a string when provided.`);
+  }
+
+  return value;
+}
+
+function readNullableString(
+  record: Record<string, unknown>,
+  fieldName: string,
+): string | null {
+  const value = record[fieldName];
+
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    throw new ValidationError(`${fieldName} must be a string or null.`);
   }
 
   return value;
@@ -860,6 +1032,32 @@ function matchOrganizationResource(
   return {
     organizationId: segments[1] ?? "",
     resource: segments[2] ?? "",
+  };
+}
+
+function matchInternalAuthTokenAction(
+  pathname: string,
+): { tokenId: string; action: "rotate" | "revoke" } | null {
+  const segments = pathname.split("/").filter(Boolean);
+
+  if (
+    segments.length !== 5 ||
+    segments[0] !== "internal" ||
+    segments[1] !== "auth" ||
+    segments[2] !== "tokens"
+  ) {
+    return null;
+  }
+
+  const action = segments[4];
+
+  if (action !== "rotate" && action !== "revoke") {
+    return null;
+  }
+
+  return {
+    tokenId: segments[3] ?? "",
+    action,
   };
 }
 
