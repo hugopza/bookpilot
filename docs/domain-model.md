@@ -506,6 +506,28 @@ Examples:
 
 ---
 
+### Internal API access token
+
+An **internal API access token** represents an internal operator credential used to access organization-scoped operational APIs safely.
+
+### Typical attributes
+
+- token hash (not raw secret)
+- role (for example: platform admin or organization operator)
+- optional organization scope
+- active/disabled state
+- optional expiration
+- last-used timestamp
+
+### Invariants
+
+- internal access credentials must be validated before operational API access
+- organization-scoped roles must not access other organizations
+- platform-wide roles should be explicit and limited
+- auth state must remain operational support state and must not redefine canonical booking truth
+
+---
+
 ## Key relationships summary
 
 A simplified conceptual relationship map is:

@@ -22,6 +22,12 @@ import {
 } from "@bookpilot/booking-core";
 import { Pool } from "pg";
 
+import {
+  InternalApiForbiddenError,
+  InternalApiUnauthorizedError,
+  PostgresInternalApiAuthRepository,
+  createInternalApiAuthService,
+} from "./internal-auth";
 import { PostgresBookingCoreRepository } from "./postgres-booking-core-repository";
 import {
   normalizeResendEmailFeedbackEvent,
@@ -34,10 +40,12 @@ if (!databaseUrl) {
   throw new Error("DATABASE_URL is required to start the API.");
 }
 
-const repository = new PostgresBookingCoreRepository(
-  new Pool({
-    connectionString: databaseUrl,
-  }),
+const pool = new Pool({
+  connectionString: databaseUrl,
+});
+const repository = new PostgresBookingCoreRepository(pool);
+const internalApiAuthService = createInternalApiAuthService(
+  new PostgresInternalApiAuthRepository(pool),
 );
 
 const availabilityService = createAvailabilityService(repository);
@@ -93,13 +101,17 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    const principal = await internalApiAuthService.authenticateRequest(request);
+
     if (request.method === "GET" && pathname === "/organizations") {
+      internalApiAuthService.assertPlatformAdmin(principal);
       const result = await organizationConfigurationService.list();
       writeJson(response, 200, result);
       return;
     }
 
     if (request.method === "POST" && pathname === "/organizations") {
+      internalApiAuthService.assertPlatformAdmin(principal);
       const payload = await readJsonBody(request);
       const result = await organizationConfigurationService.create(
         asCreateOrganizationInput(payload),
@@ -110,16 +122,24 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "POST" && pathname === "/availability/search") {
       const payload = await readJsonBody(request);
-      const result = await availabilityService.lookup(
-        asAvailabilityLookupInput(payload),
+      const input = asAvailabilityLookupInput(payload);
+      internalApiAuthService.assertOrganizationAccess(
+        principal,
+        input.organizationId,
       );
+      const result = await availabilityService.lookup(input);
       writeJson(response, 200, result);
       return;
     }
 
     if (request.method === "POST" && pathname === "/bookings") {
       const payload = await readJsonBody(request);
-      const result = await bookingService.create(asCreateBookingInput(payload));
+      const input = asCreateBookingInput(payload);
+      internalApiAuthService.assertOrganizationAccess(
+        principal,
+        input.organizationId,
+      );
+      const result = await bookingService.create(input);
       writeJson(response, 201, result);
       return;
     }
@@ -128,6 +148,7 @@ const server = createServer(async (request, response) => {
 
     if (organizationResource) {
       const { organizationId, resource } = organizationResource;
+      internalApiAuthService.assertOrganizationAccess(principal, organizationId);
 
       if (request.method === "GET" && resource === "services") {
         const result = await serviceConfigurationService.list(organizationId);
@@ -225,6 +246,7 @@ const server = createServer(async (request, response) => {
 
     if (notificationChannelConfigurationAction) {
       const { organizationId, channel } = notificationChannelConfigurationAction;
+      internalApiAuthService.assertOrganizationAccess(principal, organizationId);
 
       if (request.method === "GET") {
         const result = await notificationChannelConfigurationService.get(
@@ -258,6 +280,10 @@ const server = createServer(async (request, response) => {
     const notificationJobPath = matchOrganizationNotificationJobPath(pathname);
 
     if (notificationJobPath && request.method === "GET") {
+      internalApiAuthService.assertOrganizationAccess(
+        principal,
+        notificationJobPath.organizationId,
+      );
       const result = await notificationDeliveryObservabilityService.getOrganizationJob(
         {
           organizationId: notificationJobPath.organizationId,
@@ -272,6 +298,7 @@ const server = createServer(async (request, response) => {
 
     if (bookingAction) {
       const { organizationId, bookingId, action } = bookingAction;
+      internalApiAuthService.assertOrganizationAccess(principal, organizationId);
 
       if (request.method === "POST" && action === "cancel") {
         const result = await bookingManagementService.cancel({
@@ -341,6 +368,16 @@ function writeJson(
 }
 
 function handleError(response: ServerResponse, error: unknown): void {
+  if (error instanceof InternalApiUnauthorizedError) {
+    writeJson(response, 401, { error: error.message, code: error.code });
+    return;
+  }
+
+  if (error instanceof InternalApiForbiddenError) {
+    writeJson(response, 403, { error: error.message, code: error.code });
+    return;
+  }
+
   if (error instanceof ValidationError) {
     writeJson(response, 400, { error: error.message, code: error.code });
     return;
