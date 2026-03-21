@@ -5,6 +5,7 @@ import {
   ConflictError,
   createAvailabilityRuleConfigurationService,
   createBookingManagementService,
+  createNotificationDeliveryFeedbackService,
   createNotificationChannelConfigurationService,
   type CreateBookingInput,
   type NotificationChannel,
@@ -21,6 +22,10 @@ import {
 import { Pool } from "pg";
 
 import { PostgresBookingCoreRepository } from "./postgres-booking-core-repository";
+import {
+  normalizeResendEmailFeedbackEvent,
+  verifyResendWebhookSignature,
+} from "./notifications/email/resend-email-feedback";
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -47,7 +52,11 @@ const availabilityRuleConfigurationService =
 const timeOffConfigurationService = createTimeOffConfigurationService(repository);
 const notificationChannelConfigurationService =
   createNotificationChannelConfigurationService(repository);
+const notificationDeliveryFeedbackService =
+  createNotificationDeliveryFeedbackService(repository);
 const port = Number(process.env.PORT ?? "3001");
+const resendWebhookSecret = process.env.RESEND_WEBHOOK_SECRET ?? "";
+const resendWebhookBearerToken = process.env.RESEND_WEBHOOK_BEARER_TOKEN ?? "";
 
 const server = createServer(async (request, response) => {
   try {
@@ -56,6 +65,28 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "GET" && pathname === "/health") {
       writeJson(response, 200, { status: "ok" });
+      return;
+    }
+
+    if (
+      request.method === "POST" &&
+      pathname === "/internal/providers/resend/email-delivery-feedback"
+    ) {
+      const rawBody = await readRawBody(request);
+      assertResendWebhookAuthorized(request, rawBody);
+      const payload = parseJsonFromRawBody(rawBody);
+      const normalized = normalizeResendEmailFeedbackEvent(payload, new Date());
+      const result = await notificationDeliveryFeedbackService.ingest({
+        providerKey: normalized.providerKey,
+        providerEventId: normalized.providerEventId,
+        providerMessageId: normalized.providerMessageId,
+        providerStatus: normalized.providerStatus,
+        normalizedStatus: normalized.normalizedStatus,
+        occurredAt: normalized.occurredAt,
+        payload: normalized.payload,
+      });
+
+      writeJson(response, 200, result);
       return;
     }
 
@@ -247,18 +278,26 @@ server.listen(port, () => {
 });
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  const body = await readRawBody(request);
+
+  if (body.length === 0) {
+    return {};
+  }
+
+  return parseJsonFromRawBody(body);
+}
+
+async function readRawBody(request: IncomingMessage): Promise<string> {
   const chunks: Uint8Array[] = [];
 
   for await (const chunk of request) {
     chunks.push(chunk);
   }
 
-  const body = Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks).toString("utf8");
+}
 
-  if (body.length === 0) {
-    return {};
-  }
-
+function parseJsonFromRawBody(body: string): unknown {
   try {
     return JSON.parse(body);
   } catch {
@@ -634,6 +673,49 @@ function readOptionalChannelOrigin(
 
 function getRequestUrl(request: IncomingMessage): URL {
   return new URL(request.url ?? "/", "http://localhost");
+}
+
+function assertResendWebhookAuthorized(
+  request: IncomingMessage,
+  rawBody: string,
+): void {
+  if (resendWebhookSecret.length > 0) {
+    const isValidSignature = verifyResendWebhookSignature({
+      rawBody,
+      svixId: readSingleHeader(request, "svix-id"),
+      svixTimestamp: readSingleHeader(request, "svix-timestamp"),
+      svixSignature: readSingleHeader(request, "svix-signature"),
+      webhookSecret: resendWebhookSecret,
+    });
+
+    if (!isValidSignature) {
+      throw new ValidationError("Invalid Resend webhook signature.");
+    }
+
+    return;
+  }
+
+  if (resendWebhookBearerToken.length > 0) {
+    const authorization = readSingleHeader(request, "authorization");
+    const expectedValue = `Bearer ${resendWebhookBearerToken}`;
+
+    if (authorization !== expectedValue) {
+      throw new ValidationError("Invalid Resend webhook authorization.");
+    }
+  }
+}
+
+function readSingleHeader(
+  request: IncomingMessage,
+  headerName: string,
+): string | null {
+  const value = request.headers[headerName];
+
+  if (!value) {
+    return null;
+  }
+
+  return Array.isArray(value) ? value[0] ?? null : value;
 }
 
 function matchOrganizationResource(

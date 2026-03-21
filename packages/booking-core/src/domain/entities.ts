@@ -16,6 +16,17 @@ export type NotificationJobAttemptStatus =
   | "succeeded"
   | "failed";
 
+export type NotificationDeliveryStatus =
+  | "accepted"
+  | "delivered"
+  | "deferred"
+  | "bounced"
+  | "complained"
+  | "opened"
+  | "clicked"
+  | "failed"
+  | "unknown";
+
 export type NotificationChannel =
   | "whatsapp"
   | "sms"
@@ -139,11 +150,38 @@ export interface NotificationJobAttempt {
   attemptNumber: number;
   processingToken: string;
   status: NotificationJobAttemptStatus;
+  providerKey: string | null;
+  providerMessageId: string | null;
+  deliveryStatus: NotificationDeliveryStatus | null;
+  deliveryStatusUpdatedAt: Date | null;
+  deliveryStatusMetadata: Record<string, unknown>;
   outcomeCode: string | null;
   outcomeMessage: string | null;
   outcomePayload: Record<string, unknown>;
   startedAt: Date;
   finishedAt: Date | null;
+}
+
+export interface NotificationDeliveryFeedbackEvent {
+  id: string;
+  providerKey: string;
+  providerEventId: string;
+  providerMessageId: string;
+  providerStatus: string;
+  normalizedStatus: NotificationDeliveryStatus;
+  occurredAt: Date;
+  receivedAt: Date;
+  organizationId: string | null;
+  notificationJobId: string | null;
+  notificationJobAttemptId: string | null;
+  payload: Record<string, unknown>;
+}
+
+export interface NotificationDeliveryFeedbackReconciliationResult {
+  feedbackEvent: NotificationDeliveryFeedbackEvent;
+  duplicate: boolean;
+  matched: boolean;
+  updatedAttempt: boolean;
 }
 
 export interface ClaimedNotificationJob {

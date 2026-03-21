@@ -9,6 +9,8 @@ import type {
   CustomerContactInput,
   DateRange,
   NotificationChannel,
+  NotificationDeliveryFeedbackReconciliationResult,
+  NotificationDeliveryStatus,
   NotificationJob,
   NotificationJobAttempt,
   OrganizationNotificationChannelConfiguration,
@@ -137,6 +139,19 @@ export interface NotificationProcessingRepository {
     errorMessage: string;
     outcomePayload: Record<string, unknown>;
   }): Promise<NotificationJob | null>;
+}
+
+export interface NotificationFeedbackRepository {
+  reconcileNotificationDeliveryFeedback(input: {
+    providerKey: string;
+    providerEventId: string;
+    providerMessageId: string;
+    providerStatus: string;
+    normalizedStatus: NotificationDeliveryStatus;
+    occurredAt: Date;
+    receivedAt: Date;
+    payload: Record<string, unknown>;
+  }): Promise<NotificationDeliveryFeedbackReconciliationResult>;
 }
 
 export interface ConfigurationRepository

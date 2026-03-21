@@ -10,6 +10,9 @@ import type {
   CustomerContactInput,
   DateRange,
   NotificationChannel,
+  NotificationDeliveryFeedbackEvent,
+  NotificationDeliveryFeedbackReconciliationResult,
+  NotificationDeliveryStatus,
   NotificationJob,
   NotificationJobAttempt,
   OrganizationNotificationChannelConfiguration,
@@ -24,6 +27,7 @@ import type {
   BookingMutationStore,
   BookingRepository,
   ConfigurationRepository,
+  NotificationFeedbackRepository,
   NotificationProcessingRepository,
 } from "../repositories";
 import { overlaps } from "../utils/date-time";
@@ -40,6 +44,7 @@ interface SeedData {
   notificationJobs?: NotificationJob[];
   notificationJobAttempts?: NotificationJobAttempt[];
   organizationNotificationChannelConfigurations?: OrganizationNotificationChannelConfiguration[];
+  notificationDeliveryFeedbackEvents?: NotificationDeliveryFeedbackEvent[];
 }
 
 export class InMemoryBookingCoreRepository
@@ -47,7 +52,8 @@ export class InMemoryBookingCoreRepository
     BookingRepository,
     BookingMutationStore,
     ConfigurationRepository,
-    NotificationProcessingRepository
+    NotificationProcessingRepository,
+    NotificationFeedbackRepository
 {
   private readonly organizations = new Map<string, Organization>();
   private readonly services = new Map<string, Service>();
@@ -59,6 +65,10 @@ export class InMemoryBookingCoreRepository
   private readonly bookingEvents = new Map<string, BookingEvent>();
   private readonly notificationJobs = new Map<string, NotificationJob>();
   private readonly notificationJobAttempts = new Map<string, NotificationJobAttempt>();
+  private readonly notificationDeliveryFeedbackEvents = new Map<
+    string,
+    NotificationDeliveryFeedbackEvent
+  >();
   private readonly organizationNotificationChannelConfigurations = new Map<
     string,
     OrganizationNotificationChannelConfiguration
@@ -99,6 +109,12 @@ export class InMemoryBookingCoreRepository
           configuration.channel,
         ),
         configuration,
+      ),
+    );
+    seedData.notificationDeliveryFeedbackEvents?.forEach((event) =>
+      this.notificationDeliveryFeedbackEvents.set(
+        this.toFeedbackEventKey(event.providerKey, event.providerEventId),
+        event,
       ),
     );
   }
@@ -676,6 +692,11 @@ export class InMemoryBookingCoreRepository
         attemptNumber,
         processingToken,
         status: "processing",
+        providerKey: null,
+        providerMessageId: null,
+        deliveryStatus: null,
+        deliveryStatusUpdatedAt: null,
+        deliveryStatusMetadata: {},
         outcomeCode: null,
         outcomeMessage: null,
         outcomePayload: {},
@@ -724,9 +745,31 @@ export class InMemoryBookingCoreRepository
       lastErrorMessage: null,
       updatedAt: input.finishedAt,
     };
+    const providerDelivery = readProviderDelivery(input.outcomePayload);
+    const hasProviderMessageId =
+      typeof providerDelivery?.providerMessageId === "string";
     const updatedAttempt: NotificationJobAttempt = {
       ...attempt,
       status: "succeeded",
+      providerKey: providerDelivery?.provider ?? attempt.providerKey,
+      providerMessageId:
+        providerDelivery?.providerMessageId ?? attempt.providerMessageId,
+      deliveryStatus:
+        hasProviderMessageId
+          ? "accepted"
+          : attempt.deliveryStatus,
+      deliveryStatusUpdatedAt:
+        hasProviderMessageId
+          ? input.finishedAt
+          : attempt.deliveryStatusUpdatedAt,
+      deliveryStatusMetadata:
+        hasProviderMessageId
+          ? {
+              providerStatus: providerDelivery.providerStatus,
+              providerEventId: null,
+              occurredAt: input.finishedAt.toISOString(),
+            }
+          : attempt.deliveryStatusMetadata,
       outcomePayload: input.outcomePayload,
       finishedAt: input.finishedAt,
     };
@@ -780,6 +823,7 @@ export class InMemoryBookingCoreRepository
     const updatedAttempt: NotificationJobAttempt = {
       ...attempt,
       status: "failed",
+      providerKey: readProviderDelivery(input.outcomePayload)?.provider ?? attempt.providerKey,
       outcomeCode: input.errorCode,
       outcomeMessage: input.errorMessage,
       outcomePayload: input.outcomePayload,
@@ -817,6 +861,113 @@ export class InMemoryBookingCoreRepository
       .sort((left, right) => left.attemptNumber - right.attemptNumber);
   }
 
+  async reconcileNotificationDeliveryFeedback(input: {
+    providerKey: string;
+    providerEventId: string;
+    providerMessageId: string;
+    providerStatus: string;
+    normalizedStatus: NotificationDeliveryStatus;
+    occurredAt: Date;
+    receivedAt: Date;
+    payload: Record<string, unknown>;
+  }): Promise<NotificationDeliveryFeedbackReconciliationResult> {
+    const key = this.toFeedbackEventKey(input.providerKey, input.providerEventId);
+    const existing = this.notificationDeliveryFeedbackEvents.get(key);
+
+    if (existing) {
+      return {
+        feedbackEvent: existing,
+        duplicate: true,
+        matched: existing.notificationJobAttemptId !== null,
+        updatedAttempt: false,
+      };
+    }
+
+    const matchedAttempt =
+      [...this.notificationJobAttempts.values()].find(
+        (attempt) =>
+          attempt.providerKey === input.providerKey &&
+          attempt.providerMessageId === input.providerMessageId,
+      ) ?? null;
+    const matchedJob =
+      matchedAttempt !== null
+        ? this.notificationJobs.get(matchedAttempt.notificationJobId) ?? null
+        : null;
+
+    const feedbackEvent: NotificationDeliveryFeedbackEvent = {
+      id: randomUUID(),
+      providerKey: input.providerKey,
+      providerEventId: input.providerEventId,
+      providerMessageId: input.providerMessageId,
+      providerStatus: input.providerStatus,
+      normalizedStatus: input.normalizedStatus,
+      occurredAt: input.occurredAt,
+      receivedAt: input.receivedAt,
+      organizationId: matchedJob?.organizationId ?? null,
+      notificationJobId: matchedJob?.id ?? null,
+      notificationJobAttemptId: matchedAttempt?.id ?? null,
+      payload: input.payload,
+    };
+
+    this.notificationDeliveryFeedbackEvents.set(key, feedbackEvent);
+
+    let updatedAttempt = false;
+
+    if (matchedAttempt) {
+      const shouldUpdate =
+        matchedAttempt.deliveryStatusUpdatedAt === null ||
+        input.occurredAt >= matchedAttempt.deliveryStatusUpdatedAt;
+
+      if (shouldUpdate) {
+        const nextOutcomePayload: Record<string, unknown> = {
+          ...matchedAttempt.outcomePayload,
+          providerDelivery: {
+            ...readObjectRecord(matchedAttempt.outcomePayload.providerDelivery),
+            feedback: {
+              latest: {
+                providerStatus: input.providerStatus,
+                normalizedStatus: input.normalizedStatus,
+                providerEventId: input.providerEventId,
+                occurredAt: input.occurredAt.toISOString(),
+              },
+            },
+          },
+        };
+        const updated: NotificationJobAttempt = {
+          ...matchedAttempt,
+          deliveryStatus: input.normalizedStatus,
+          deliveryStatusUpdatedAt: input.occurredAt,
+          deliveryStatusMetadata: {
+            providerStatus: input.providerStatus,
+            providerEventId: input.providerEventId,
+            occurredAt: input.occurredAt.toISOString(),
+          },
+          outcomePayload: nextOutcomePayload,
+        };
+
+        this.notificationJobAttempts.set(updated.id, updated);
+        updatedAttempt = true;
+      }
+    }
+
+    return {
+      feedbackEvent,
+      duplicate: false,
+      matched: matchedAttempt !== null,
+      updatedAttempt,
+    };
+  }
+
+  listPersistedNotificationDeliveryFeedbackEvents(
+    organizationId?: string,
+  ): NotificationDeliveryFeedbackEvent[] {
+    return [...this.notificationDeliveryFeedbackEvents.values()]
+      .filter((event) =>
+        organizationId === undefined ? true : event.organizationId === organizationId,
+      )
+      .sort((left, right) => left.receivedAt.getTime() - right.receivedAt.getTime());
+  }
+
   private findAttemptByProcessingToken(
     processingToken: string,
   ): NotificationJobAttempt | null {
@@ -833,6 +984,49 @@ export class InMemoryBookingCoreRepository
   ): string {
     return `${organizationId}:${channel}`;
   }
+
+  private toFeedbackEventKey(providerKey: string, providerEventId: string): string {
+    return `${providerKey}:${providerEventId}`;
+  }
+}
+
+function readProviderDelivery(payload: Record<string, unknown>): {
+  provider: string | null;
+  providerMessageId: string | null;
+  providerStatus: string | null;
+} | null {
+  const providerDelivery = readObjectRecord(payload.providerDelivery);
+
+  if (!providerDelivery) {
+    return null;
+  }
+
+  const result = readObjectRecord(providerDelivery.result);
+
+  return {
+    provider:
+      typeof providerDelivery.provider === "string"
+        ? providerDelivery.provider
+        : null,
+    providerMessageId:
+      result && typeof result.providerMessageId === "string"
+        ? result.providerMessageId
+        : null,
+    providerStatus:
+      result && typeof result.providerStatus === "string"
+        ? result.providerStatus
+        : null,
+  };
+}
+
+function readObjectRecord(
+  value: unknown,
+): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
 }
 
 export function asAvailabilityRepository(

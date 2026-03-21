@@ -14,6 +14,9 @@ import {
   type DateRange,
   type ClaimedNotificationJob,
   type NotificationChannel,
+  type NotificationDeliveryFeedbackEvent,
+  type NotificationDeliveryFeedbackReconciliationResult,
+  type NotificationDeliveryStatus,
   type NotificationJob,
   type NotificationJobAttempt,
   type OrganizationNotificationChannelConfiguration,
@@ -23,6 +26,7 @@ import {
   type TimeOff,
 } from "@bookpilot/booking-core";
 import type { NotificationProcessingRepository } from "@bookpilot/booking-core";
+import type { NotificationFeedbackRepository } from "@bookpilot/booking-core";
 
 interface QueryRunner {
   query<T extends QueryResultRow>(
@@ -35,7 +39,8 @@ export class PostgresBookingCoreRepository
   implements
     BookingRepository,
     ConfigurationRepository,
-    NotificationProcessingRepository
+    NotificationProcessingRepository,
+    NotificationFeedbackRepository
 {
   constructor(private readonly pool: Pool) {}
 
@@ -709,6 +714,33 @@ export class PostgresBookingCoreRepository
           set
             status = 'succeeded',
             outcome_payload = $4::jsonb,
+            provider_key = nullif($4::jsonb #>> '{providerDelivery,provider}', ''),
+            provider_message_id = nullif(
+              $4::jsonb #>> '{providerDelivery,result,providerMessageId}',
+              ''
+            ),
+            delivery_status = case
+              when nullif($4::jsonb #>> '{providerDelivery,result,providerMessageId}', '') is not null
+                then 'accepted'
+              else delivery_status
+            end,
+            delivery_status_updated_at = case
+              when nullif($4::jsonb #>> '{providerDelivery,result,providerMessageId}', '') is not null
+                then $3
+              else delivery_status_updated_at
+            end,
+            delivery_status_metadata = case
+              when nullif($4::jsonb #>> '{providerDelivery,result,providerMessageId}', '') is not null
+                then jsonb_build_object(
+                  'providerStatus',
+                  nullif($4::jsonb #>> '{providerDelivery,result,providerStatus}', ''),
+                  'providerEventId',
+                  null,
+                  'occurredAt',
+                  $3
+                )
+              else delivery_status_metadata
+            end,
             finished_at = $3
           where notification_job_id = $1
             and processing_token = $2
@@ -775,6 +807,32 @@ export class PostgresBookingCoreRepository
             outcome_code = $4,
             outcome_message = $5,
             outcome_payload = $6::jsonb,
+            provider_key = coalesce(
+              nullif($6::jsonb #>> '{providerDelivery,provider}', ''),
+              provider_key
+            ),
+            delivery_status = case
+              when nullif($6::jsonb #>> '{providerDelivery,provider}', '') is not null
+                then 'failed'
+              else delivery_status
+            end,
+            delivery_status_updated_at = case
+              when nullif($6::jsonb #>> '{providerDelivery,provider}', '') is not null
+                then $3
+              else delivery_status_updated_at
+            end,
+            delivery_status_metadata = case
+              when nullif($6::jsonb #>> '{providerDelivery,provider}', '') is not null
+                then jsonb_build_object(
+                  'providerStatus',
+                  nullif($6::jsonb #>> '{providerDelivery,result,providerStatus}', ''),
+                  'providerEventId',
+                  null,
+                  'occurredAt',
+                  $3
+                )
+              else delivery_status_metadata
+            end,
             finished_at = $3
           where notification_job_id = $1
             and processing_token = $2
@@ -832,6 +890,237 @@ export class PostgresBookingCoreRepository
     );
 
     return result.rows[0] ? mapNotificationJob(result.rows[0]) : null;
+  }
+
+  async reconcileNotificationDeliveryFeedback(input: {
+    providerKey: string;
+    providerEventId: string;
+    providerMessageId: string;
+    providerStatus: string;
+    normalizedStatus: NotificationDeliveryStatus;
+    occurredAt: Date;
+    receivedAt: Date;
+    payload: Record<string, unknown>;
+  }): Promise<NotificationDeliveryFeedbackReconciliationResult> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query("begin");
+
+      const existing = await client.query<NotificationDeliveryFeedbackEventRow>(
+        `
+          select
+            id,
+            provider_key,
+            provider_event_id,
+            provider_message_id,
+            provider_status,
+            normalized_status,
+            occurred_at,
+            received_at,
+            organization_id,
+            notification_job_id,
+            notification_job_attempt_id,
+            payload
+          from notification_delivery_feedback_events
+          where provider_key = $1
+            and provider_event_id = $2
+          limit 1
+        `,
+        [input.providerKey, input.providerEventId],
+      );
+
+      if (existing.rows[0]) {
+        await client.query("commit");
+        const feedbackEvent = mapNotificationDeliveryFeedbackEvent(existing.rows[0]);
+        return {
+          feedbackEvent,
+          duplicate: true,
+          matched: feedbackEvent.notificationJobAttemptId !== null,
+          updatedAttempt: false,
+        };
+      }
+
+      const matchedAttempt = await client.query<MatchedNotificationAttemptRow>(
+        `
+          select
+            notification_job_attempts.id as notification_job_attempt_id,
+            notification_job_attempts.notification_job_id as notification_job_id,
+            notification_jobs.organization_id as organization_id,
+            notification_job_attempts.delivery_status_updated_at as delivery_status_updated_at
+          from notification_job_attempts
+          inner join notification_jobs
+            on notification_jobs.id = notification_job_attempts.notification_job_id
+          where notification_job_attempts.provider_key = $1
+            and notification_job_attempts.provider_message_id = $2
+          order by notification_job_attempts.started_at desc
+          limit 1
+        `,
+        [input.providerKey, input.providerMessageId],
+      );
+
+      const matched = matchedAttempt.rows[0] ?? null;
+
+      const inserted = await client.query<NotificationDeliveryFeedbackEventRow>(
+        `
+          insert into notification_delivery_feedback_events (
+            provider_key,
+            provider_event_id,
+            provider_message_id,
+            provider_status,
+            normalized_status,
+            occurred_at,
+            received_at,
+            organization_id,
+            notification_job_id,
+            notification_job_attempt_id,
+            payload
+          )
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+          on conflict (provider_key, provider_event_id) do nothing
+          returning
+            id,
+            provider_key,
+            provider_event_id,
+            provider_message_id,
+            provider_status,
+            normalized_status,
+            occurred_at,
+            received_at,
+            organization_id,
+            notification_job_id,
+            notification_job_attempt_id,
+            payload
+        `,
+        [
+          input.providerKey,
+          input.providerEventId,
+          input.providerMessageId,
+          input.providerStatus,
+          input.normalizedStatus,
+          input.occurredAt.toISOString(),
+          input.receivedAt.toISOString(),
+          matched?.organization_id ?? null,
+          matched?.notification_job_id ?? null,
+          matched?.notification_job_attempt_id ?? null,
+          JSON.stringify(input.payload),
+        ],
+      );
+
+      const insertedEvent = inserted.rows[0];
+
+      if (!insertedEvent) {
+        const concurrentExisting = await client.query<NotificationDeliveryFeedbackEventRow>(
+          `
+            select
+              id,
+              provider_key,
+              provider_event_id,
+              provider_message_id,
+              provider_status,
+              normalized_status,
+              occurred_at,
+              received_at,
+              organization_id,
+              notification_job_id,
+              notification_job_attempt_id,
+              payload
+            from notification_delivery_feedback_events
+            where provider_key = $1
+              and provider_event_id = $2
+            limit 1
+          `,
+          [input.providerKey, input.providerEventId],
+        );
+
+        await client.query("commit");
+        const existingRow = concurrentExisting.rows[0];
+
+        if (!existingRow) {
+          throw new Error(
+            "Failed to resolve existing notification feedback event after conflict.",
+          );
+        }
+
+        const feedbackEvent = mapNotificationDeliveryFeedbackEvent(existingRow);
+        return {
+          feedbackEvent,
+          duplicate: true,
+          matched: feedbackEvent.notificationJobAttemptId !== null,
+          updatedAttempt: false,
+        };
+      }
+
+      let updatedAttempt = false;
+
+      if (matched?.notification_job_attempt_id) {
+        const previousStatusUpdatedAt = matched.delivery_status_updated_at
+          ? toDate(matched.delivery_status_updated_at)
+          : null;
+        const shouldUpdateAttempt =
+          previousStatusUpdatedAt === null ||
+          input.occurredAt >= previousStatusUpdatedAt;
+
+        if (shouldUpdateAttempt) {
+          const updateAttempt = await client.query<{ id: string }>(
+            `
+              update notification_job_attempts
+              set
+                delivery_status = $2,
+                delivery_status_updated_at = $3,
+                delivery_status_metadata = jsonb_build_object(
+                  'providerStatus',
+                  $4,
+                  'providerEventId',
+                  $5,
+                  'occurredAt',
+                  $3
+                ),
+                outcome_payload = jsonb_set(
+                  coalesce(outcome_payload, '{}'::jsonb),
+                  '{providerDelivery,feedback,latest}',
+                  jsonb_build_object(
+                    'providerStatus',
+                    $4,
+                    'normalizedStatus',
+                    $2,
+                    'providerEventId',
+                    $5,
+                    'occurredAt',
+                    $3
+                  ),
+                  true
+                )
+              where id = $1
+              returning id
+            `,
+            [
+              matched.notification_job_attempt_id,
+              input.normalizedStatus,
+              input.occurredAt.toISOString(),
+              input.providerStatus,
+              input.providerEventId,
+            ],
+          );
+
+          updatedAttempt = Boolean(updateAttempt.rows[0]);
+        }
+      }
+
+      await client.query("commit");
+      const feedbackEvent = mapNotificationDeliveryFeedbackEvent(insertedEvent);
+      return {
+        feedbackEvent,
+        duplicate: false,
+        matched: feedbackEvent.notificationJobAttemptId !== null,
+        updatedAttempt,
+      };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 
@@ -1468,11 +1757,38 @@ interface NotificationJobAttemptRow {
   attempt_number: number;
   processing_token: string;
   status: NotificationJobAttempt["status"];
+  provider_key?: string | null;
+  provider_message_id?: string | null;
+  delivery_status?: NotificationDeliveryStatus | null;
+  delivery_status_updated_at?: Date | string | null;
+  delivery_status_metadata?: Record<string, unknown> | string | null;
   outcome_code: string | null;
   outcome_message: string | null;
   outcome_payload: Record<string, unknown> | string;
   started_at: Date | string;
   finished_at: Date | string | null;
+}
+
+interface NotificationDeliveryFeedbackEventRow {
+  id: string;
+  provider_key: string;
+  provider_event_id: string;
+  provider_message_id: string;
+  provider_status: string;
+  normalized_status: NotificationDeliveryStatus;
+  occurred_at: Date | string;
+  received_at: Date | string;
+  organization_id: string | null;
+  notification_job_id: string | null;
+  notification_job_attempt_id: string | null;
+  payload: Record<string, unknown> | string;
+}
+
+interface MatchedNotificationAttemptRow {
+  notification_job_attempt_id: string;
+  notification_job_id: string;
+  organization_id: string;
+  delivery_status_updated_at: Date | string | null;
 }
 
 interface ClaimedNotificationJobRow {
@@ -1652,11 +1968,39 @@ function mapNotificationJobAttempt(
     attemptNumber: row.attempt_number,
     processingToken: row.processing_token,
     status: row.status,
+    providerKey: row.provider_key ?? null,
+    providerMessageId: row.provider_message_id ?? null,
+    deliveryStatus: row.delivery_status ?? null,
+    deliveryStatusUpdatedAt: row.delivery_status_updated_at
+      ? toDate(row.delivery_status_updated_at)
+      : null,
+    deliveryStatusMetadata: row.delivery_status_metadata
+      ? toRecord(row.delivery_status_metadata)
+      : {},
     outcomeCode: row.outcome_code,
     outcomeMessage: row.outcome_message,
     outcomePayload: toRecord(row.outcome_payload),
     startedAt: toDate(row.started_at),
     finishedAt: row.finished_at ? toDate(row.finished_at) : null,
+  };
+}
+
+function mapNotificationDeliveryFeedbackEvent(
+  row: NotificationDeliveryFeedbackEventRow,
+): NotificationDeliveryFeedbackEvent {
+  return {
+    id: row.id,
+    providerKey: row.provider_key,
+    providerEventId: row.provider_event_id,
+    providerMessageId: row.provider_message_id,
+    providerStatus: row.provider_status,
+    normalizedStatus: row.normalized_status,
+    occurredAt: toDate(row.occurred_at),
+    receivedAt: toDate(row.received_at),
+    organizationId: row.organization_id,
+    notificationJobId: row.notification_job_id,
+    notificationJobAttemptId: row.notification_job_attempt_id,
+    payload: toRecord(row.payload),
   };
 }
 

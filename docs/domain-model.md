@@ -481,6 +481,7 @@ This entity is useful when asynchronous delivery and retry behavior matter.
 - notification tracking must not become the source of booking truth
 - failed or delayed notification delivery must not corrupt canonical booking state
 - retry and idempotency state should remain inside the platform rather than inside transport providers
+- provider feedback events may update operational delivery status timelines, but must not redefine canonical booking state
 
 ---
 

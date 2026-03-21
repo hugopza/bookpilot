@@ -334,6 +334,7 @@ Communicate important booking lifecycle events after the canonical state is alre
 3. the notification job or outbound action is created
 4. delivery is attempted via the appropriate channel
 5. delivery outcome may be tracked operationally
+6. provider delivery feedback callbacks may be ingested and reconciled into operational delivery status timelines
 
 ### Important rule
 
