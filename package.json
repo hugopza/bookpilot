@@ -9,8 +9,9 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
-    "test": "npm run build && node packages/booking-core/dist/self-test.js",
-    "start:api": "node apps/api/dist/server.js"
+    "test": "npm run build && node packages/booking-core/dist/self-test.js && node apps/api/dist/notification-worker-self-test.js",
+    "start:api": "node apps/api/dist/server.js",
+    "start:worker": "node apps/api/dist/notification-worker.js"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",

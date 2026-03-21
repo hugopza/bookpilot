@@ -241,10 +241,18 @@ async function runConfigurationScenario(): Promise<void> {
   assert.equal(notificationJobs[0]?.status, "pending");
   assert.equal(notificationJobs[1]?.status, "pending");
   assert.equal(notificationJobs[2]?.status, "pending");
+  const firstProcessingAt = new Date(
+    Math.max(...notificationJobs.map((job) => job.nextAttemptAt.getTime())) +
+      60 * 1000,
+  );
+  const secondProcessingAt = new Date(
+    firstProcessingAt.getTime() + 10 * 60 * 1000,
+  );
+  const thirdProcessingAt = new Date(secondProcessingAt.getTime() + 60 * 1000);
 
   const firstProcessingRun = await notificationProcessingService.processPending({
     limit: 10,
-    now: new Date("2026-03-16T12:00:00.000Z"),
+    now: firstProcessingAt,
   });
 
   assert.deepEqual(firstProcessingRun, {
@@ -257,31 +265,67 @@ async function runConfigurationScenario(): Promise<void> {
   const jobsAfterFirstRun = repository.listPersistedNotificationJobs(organization.id);
   const attemptsAfterFirstRun =
     repository.listPersistedNotificationJobAttempts(organization.id);
-
-  assert.equal(jobsAfterFirstRun[0]?.status, "succeeded");
-  assert.equal(jobsAfterFirstRun[0]?.attemptCount, 1);
-  assert.equal(jobsAfterFirstRun[1]?.status, "pending");
-  assert.equal(jobsAfterFirstRun[1]?.attemptCount, 1);
-  assert.equal(
-    jobsAfterFirstRun[1]?.nextAttemptAt.toISOString(),
-    "2026-03-16T12:10:00.000Z",
+  const jobsByEventTypeAfterFirstRun = new Map(
+    jobsAfterFirstRun.map((job) => [job.eventType, job]),
   );
-  assert.equal(jobsAfterFirstRun[1]?.lastErrorCode, "TEMPORARY_DELIVERY_FAILURE");
-  assert.equal(jobsAfterFirstRun[2]?.status, "failed");
-  assert.equal(jobsAfterFirstRun[2]?.attemptCount, 1);
-  assert.equal(jobsAfterFirstRun[2]?.lastErrorCode, "UNSUPPORTED_DELIVERY_TARGET");
+  const createdJobAfterFirstRun = jobsByEventTypeAfterFirstRun.get(
+    "booking_created",
+  );
+  const rescheduledJobAfterFirstRun = jobsByEventTypeAfterFirstRun.get(
+    "booking_rescheduled",
+  );
+  const cancelledJobAfterFirstRun = jobsByEventTypeAfterFirstRun.get(
+    "booking_cancelled",
+  );
+  const expectedRetryAt = new Date(
+    firstProcessingAt.getTime() + 10 * 60 * 1000,
+  );
+
+  assert.equal(createdJobAfterFirstRun?.status, "succeeded");
+  assert.equal(createdJobAfterFirstRun?.attemptCount, 1);
+  assert.equal(rescheduledJobAfterFirstRun?.status, "pending");
+  assert.equal(rescheduledJobAfterFirstRun?.attemptCount, 1);
+  assert.equal(
+    rescheduledJobAfterFirstRun?.nextAttemptAt.toISOString(),
+    expectedRetryAt.toISOString(),
+  );
+  assert.equal(
+    rescheduledJobAfterFirstRun?.lastErrorCode,
+    "TEMPORARY_DELIVERY_FAILURE",
+  );
+  assert.equal(cancelledJobAfterFirstRun?.status, "failed");
+  assert.equal(cancelledJobAfterFirstRun?.attemptCount, 1);
+  assert.equal(
+    cancelledJobAfterFirstRun?.lastErrorCode,
+    "UNSUPPORTED_DELIVERY_TARGET",
+  );
 
   assert.equal(attemptsAfterFirstRun.length, 3);
-  assert.equal(attemptsAfterFirstRun[0]?.status, "succeeded");
-  assert.equal(attemptsAfterFirstRun[0]?.attemptNumber, 1);
-  assert.equal(attemptsAfterFirstRun[1]?.status, "failed");
-  assert.equal(attemptsAfterFirstRun[1]?.outcomeCode, "TEMPORARY_DELIVERY_FAILURE");
-  assert.equal(attemptsAfterFirstRun[2]?.status, "failed");
-  assert.equal(attemptsAfterFirstRun[2]?.outcomeCode, "UNSUPPORTED_DELIVERY_TARGET");
+  const createdAttemptAfterFirstRun = attemptsAfterFirstRun.find(
+    (attempt) => attempt.notificationJobId === createdJobAfterFirstRun?.id,
+  );
+  const rescheduledAttemptAfterFirstRun = attemptsAfterFirstRun.find(
+    (attempt) => attempt.notificationJobId === rescheduledJobAfterFirstRun?.id,
+  );
+  const cancelledAttemptAfterFirstRun = attemptsAfterFirstRun.find(
+    (attempt) => attempt.notificationJobId === cancelledJobAfterFirstRun?.id,
+  );
+  assert.equal(createdAttemptAfterFirstRun?.status, "succeeded");
+  assert.equal(createdAttemptAfterFirstRun?.attemptNumber, 1);
+  assert.equal(rescheduledAttemptAfterFirstRun?.status, "failed");
+  assert.equal(
+    rescheduledAttemptAfterFirstRun?.outcomeCode,
+    "TEMPORARY_DELIVERY_FAILURE",
+  );
+  assert.equal(cancelledAttemptAfterFirstRun?.status, "failed");
+  assert.equal(
+    cancelledAttemptAfterFirstRun?.outcomeCode,
+    "UNSUPPORTED_DELIVERY_TARGET",
+  );
 
   const secondProcessingRun = await notificationProcessingService.processPending({
     limit: 10,
-    now: new Date("2026-03-16T12:10:00.000Z"),
+    now: secondProcessingAt,
   });
 
   assert.deepEqual(secondProcessingRun, {
@@ -294,17 +338,27 @@ async function runConfigurationScenario(): Promise<void> {
   const jobsAfterSecondRun = repository.listPersistedNotificationJobs(organization.id);
   const attemptsAfterSecondRun =
     repository.listPersistedNotificationJobAttempts(organization.id);
+  const jobsByEventTypeAfterSecondRun = new Map(
+    jobsAfterSecondRun.map((job) => [job.eventType, job]),
+  );
+  const rescheduledJobAfterSecondRun = jobsByEventTypeAfterSecondRun.get(
+    "booking_rescheduled",
+  );
 
-  assert.equal(jobsAfterSecondRun[1]?.status, "succeeded");
-  assert.equal(jobsAfterSecondRun[1]?.attemptCount, 2);
-  assert.equal(jobsAfterSecondRun[1]?.processingToken, null);
+  assert.equal(rescheduledJobAfterSecondRun?.status, "succeeded");
+  assert.equal(rescheduledJobAfterSecondRun?.attemptCount, 2);
+  assert.equal(rescheduledJobAfterSecondRun?.processingToken, null);
   assert.equal(attemptsAfterSecondRun.length, 4);
-  assert.equal(attemptsAfterSecondRun[3]?.attemptNumber, 2);
-  assert.equal(attemptsAfterSecondRun[3]?.status, "succeeded");
+  const secondRescheduledAttempt = attemptsAfterSecondRun.find(
+    (attempt) =>
+      attempt.notificationJobId === rescheduledJobAfterSecondRun?.id &&
+      attempt.attemptNumber === 2,
+  );
+  assert.equal(secondRescheduledAttempt?.status, "succeeded");
 
   const thirdProcessingRun = await notificationProcessingService.processPending({
     limit: 10,
-    now: new Date("2026-03-16T12:11:00.000Z"),
+    now: thirdProcessingAt,
   });
 
   assert.deepEqual(thirdProcessingRun, {
