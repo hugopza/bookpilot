@@ -19,6 +19,8 @@ import {
   type NotificationDeliveryStatus,
   type NotificationJob,
   type NotificationJobAttempt,
+  type NotificationJobLatestDeliveryStatus,
+  type NotificationJobWithLatestDeliveryStatus,
   type OrganizationNotificationChannelConfiguration,
   type Organization,
   type Service,
@@ -27,6 +29,7 @@ import {
 } from "@bookpilot/booking-core";
 import type { NotificationProcessingRepository } from "@bookpilot/booking-core";
 import type { NotificationFeedbackRepository } from "@bookpilot/booking-core";
+import type { NotificationObservabilityRepository } from "@bookpilot/booking-core";
 
 interface QueryRunner {
   query<T extends QueryResultRow>(
@@ -40,7 +43,8 @@ export class PostgresBookingCoreRepository
     BookingRepository,
     ConfigurationRepository,
     NotificationProcessingRepository,
-    NotificationFeedbackRepository
+    NotificationFeedbackRepository,
+    NotificationObservabilityRepository
 {
   constructor(private readonly pool: Pool) {}
 
@@ -419,6 +423,193 @@ export class PostgresBookingCoreRepository
     );
 
     return result.rows.map(mapBooking);
+  }
+
+  async listOrganizationNotificationJobsWithLatestDeliveryStatus(input: {
+    organizationId: string;
+    status?: NotificationJob["status"];
+    deliveryChannel?: NotificationChannel;
+    eventType?: NotificationJob["eventType"];
+    limit: number;
+  }): Promise<NotificationJobWithLatestDeliveryStatus[]> {
+    const result =
+      await this.pool.query<NotificationJobWithLatestDeliveryStatusRow>(
+        `
+          select
+            notification_jobs.id,
+            notification_jobs.organization_id,
+            notification_jobs.booking_id,
+            notification_jobs.customer_id,
+            notification_jobs.delivery_channel,
+            notification_jobs.event_type,
+            notification_jobs.status,
+            notification_jobs.attempt_count,
+            notification_jobs.max_attempts,
+            notification_jobs.next_attempt_at,
+            notification_jobs.processing_token,
+            notification_jobs.processing_started_at,
+            notification_jobs.last_error_code,
+            notification_jobs.last_error_message,
+            notification_jobs.payload,
+            notification_jobs.created_at,
+            notification_jobs.updated_at,
+            latest_attempt.id as latest_notification_job_attempt_id,
+            latest_attempt.provider_message_id as latest_provider_message_id,
+            latest_attempt.delivery_status as latest_delivery_status,
+            latest_attempt.delivery_status_updated_at as latest_delivery_status_updated_at,
+            latest_attempt.delivery_status_metadata as latest_delivery_status_metadata
+          from notification_jobs
+          left join lateral (
+            select
+              id,
+              provider_message_id,
+              delivery_status,
+              delivery_status_updated_at,
+              delivery_status_metadata
+            from notification_job_attempts
+            where notification_job_id = notification_jobs.id
+              and delivery_status is not null
+            order by delivery_status_updated_at desc nulls last, started_at desc, attempt_number desc
+            limit 1
+          ) as latest_attempt on true
+          where notification_jobs.organization_id = $1
+            and ($2::text is null or notification_jobs.status = $2::text)
+            and ($3::text is null or notification_jobs.delivery_channel = $3::text)
+            and ($4::text is null or notification_jobs.event_type = $4::text)
+          order by notification_jobs.created_at desc, notification_jobs.id desc
+          limit $5
+        `,
+        [
+          input.organizationId,
+          input.status ?? null,
+          input.deliveryChannel ?? null,
+          input.eventType ?? null,
+          input.limit,
+        ],
+      );
+
+    return result.rows.map(mapNotificationJobWithLatestDeliveryStatus);
+  }
+
+  async getOrganizationNotificationJobWithLatestDeliveryStatus(input: {
+    organizationId: string;
+    notificationJobId: string;
+  }): Promise<NotificationJobWithLatestDeliveryStatus | null> {
+    const result =
+      await this.pool.query<NotificationJobWithLatestDeliveryStatusRow>(
+        `
+          select
+            notification_jobs.id,
+            notification_jobs.organization_id,
+            notification_jobs.booking_id,
+            notification_jobs.customer_id,
+            notification_jobs.delivery_channel,
+            notification_jobs.event_type,
+            notification_jobs.status,
+            notification_jobs.attempt_count,
+            notification_jobs.max_attempts,
+            notification_jobs.next_attempt_at,
+            notification_jobs.processing_token,
+            notification_jobs.processing_started_at,
+            notification_jobs.last_error_code,
+            notification_jobs.last_error_message,
+            notification_jobs.payload,
+            notification_jobs.created_at,
+            notification_jobs.updated_at,
+            latest_attempt.id as latest_notification_job_attempt_id,
+            latest_attempt.provider_message_id as latest_provider_message_id,
+            latest_attempt.delivery_status as latest_delivery_status,
+            latest_attempt.delivery_status_updated_at as latest_delivery_status_updated_at,
+            latest_attempt.delivery_status_metadata as latest_delivery_status_metadata
+          from notification_jobs
+          left join lateral (
+            select
+              id,
+              provider_message_id,
+              delivery_status,
+              delivery_status_updated_at,
+              delivery_status_metadata
+            from notification_job_attempts
+            where notification_job_id = notification_jobs.id
+              and delivery_status is not null
+            order by delivery_status_updated_at desc nulls last, started_at desc, attempt_number desc
+            limit 1
+          ) as latest_attempt on true
+          where notification_jobs.organization_id = $1
+            and notification_jobs.id = $2
+          limit 1
+        `,
+        [input.organizationId, input.notificationJobId],
+      );
+
+    return result.rows[0]
+      ? mapNotificationJobWithLatestDeliveryStatus(result.rows[0])
+      : null;
+  }
+
+  async listOrganizationNotificationJobAttempts(input: {
+    organizationId: string;
+    notificationJobId: string;
+  }): Promise<NotificationJobAttempt[]> {
+    const result = await this.pool.query<NotificationJobAttemptRow>(
+      `
+        select
+          notification_job_attempts.id,
+          notification_job_attempts.notification_job_id,
+          notification_job_attempts.attempt_number,
+          notification_job_attempts.processing_token,
+          notification_job_attempts.status,
+          notification_job_attempts.provider_key,
+          notification_job_attempts.provider_message_id,
+          notification_job_attempts.delivery_status,
+          notification_job_attempts.delivery_status_updated_at,
+          notification_job_attempts.delivery_status_metadata,
+          notification_job_attempts.outcome_code,
+          notification_job_attempts.outcome_message,
+          notification_job_attempts.outcome_payload,
+          notification_job_attempts.started_at,
+          notification_job_attempts.finished_at
+        from notification_job_attempts
+        inner join notification_jobs
+          on notification_jobs.id = notification_job_attempts.notification_job_id
+        where notification_jobs.organization_id = $1
+          and notification_job_attempts.notification_job_id = $2
+        order by notification_job_attempts.attempt_number asc
+      `,
+      [input.organizationId, input.notificationJobId],
+    );
+
+    return result.rows.map(mapNotificationJobAttempt);
+  }
+
+  async listOrganizationNotificationDeliveryFeedbackEvents(input: {
+    organizationId: string;
+    notificationJobId: string;
+  }): Promise<NotificationDeliveryFeedbackEvent[]> {
+    const result = await this.pool.query<NotificationDeliveryFeedbackEventRow>(
+      `
+        select
+          id,
+          provider_key,
+          provider_event_id,
+          provider_message_id,
+          provider_status,
+          normalized_status,
+          occurred_at,
+          received_at,
+          organization_id,
+          notification_job_id,
+          notification_job_attempt_id,
+          payload
+        from notification_delivery_feedback_events
+        where organization_id = $1
+          and notification_job_id = $2
+        order by occurred_at asc, received_at asc, id asc
+      `,
+      [input.organizationId, input.notificationJobId],
+    );
+
+    return result.rows.map(mapNotificationDeliveryFeedbackEvent);
   }
 
   async createOrganization(input: {
@@ -1751,6 +1942,14 @@ interface NotificationJobRow {
   updated_at: Date | string;
 }
 
+interface NotificationJobWithLatestDeliveryStatusRow extends NotificationJobRow {
+  latest_notification_job_attempt_id: string | null;
+  latest_provider_message_id: string | null;
+  latest_delivery_status: NotificationDeliveryStatus | null;
+  latest_delivery_status_updated_at: Date | string | null;
+  latest_delivery_status_metadata: Record<string, unknown> | string | null;
+}
+
 interface NotificationJobAttemptRow {
   id: string;
   notification_job_id: string;
@@ -1956,6 +2155,31 @@ function mapNotificationJob(row: NotificationJobRow): NotificationJob {
     payload: toRecord(row.payload),
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
+  };
+}
+
+function mapNotificationJobWithLatestDeliveryStatus(
+  row: NotificationJobWithLatestDeliveryStatusRow,
+): NotificationJobWithLatestDeliveryStatus {
+  const latestDeliveryStatusMetadata = row.latest_delivery_status_metadata
+    ? toRecord(row.latest_delivery_status_metadata)
+    : {};
+  const latestDeliveryStatus: NotificationJobLatestDeliveryStatus = {
+    notificationJobAttemptId: row.latest_notification_job_attempt_id,
+    providerMessageId: row.latest_provider_message_id,
+    normalizedStatus: row.latest_delivery_status,
+    providerStatus:
+      typeof latestDeliveryStatusMetadata.providerStatus === "string"
+        ? latestDeliveryStatusMetadata.providerStatus
+        : null,
+    occurredAt: row.latest_delivery_status_updated_at
+      ? toDate(row.latest_delivery_status_updated_at)
+      : null,
+  };
+
+  return {
+    job: mapNotificationJob(row),
+    latestDeliveryStatus,
   };
 }
 

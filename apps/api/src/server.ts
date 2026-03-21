@@ -6,6 +6,7 @@ import {
   createAvailabilityRuleConfigurationService,
   createBookingManagementService,
   createNotificationDeliveryFeedbackService,
+  createNotificationDeliveryObservabilityService,
   createNotificationChannelConfigurationService,
   type CreateBookingInput,
   type NotificationChannel,
@@ -54,6 +55,8 @@ const notificationChannelConfigurationService =
   createNotificationChannelConfigurationService(repository);
 const notificationDeliveryFeedbackService =
   createNotificationDeliveryFeedbackService(repository);
+const notificationDeliveryObservabilityService =
+  createNotificationDeliveryObservabilityService(repository);
 const port = Number(process.env.PORT ?? "3001");
 const resendWebhookSecret = process.env.RESEND_WEBHOOK_SECRET ?? "";
 const resendWebhookBearerToken = process.env.RESEND_WEBHOOK_BEARER_TOKEN ?? "";
@@ -196,6 +199,15 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      if (request.method === "GET" && resource === "notification-jobs") {
+        const result =
+          await notificationDeliveryObservabilityService.listOrganizationJobs(
+            asListNotificationJobsInput(url.searchParams, organizationId),
+          );
+        writeJson(response, 200, result);
+        return;
+      }
+
       if (
         request.method === "GET" &&
         resource === "notification-channel-configurations"
@@ -241,6 +253,19 @@ const server = createServer(async (request, response) => {
         writeJson(response, 200, result);
         return;
       }
+    }
+
+    const notificationJobPath = matchOrganizationNotificationJobPath(pathname);
+
+    if (notificationJobPath && request.method === "GET") {
+      const result = await notificationDeliveryObservabilityService.getOrganizationJob(
+        {
+          organizationId: notificationJobPath.organizationId,
+          notificationJobId: notificationJobPath.notificationJobId,
+        },
+      );
+      writeJson(response, 200, result);
+      return;
     }
 
     const bookingAction = matchBookingAction(pathname);
@@ -493,6 +518,74 @@ function asListBookingsInput(
     staffMemberId: searchParams.get("staffMemberId") ?? undefined,
     serviceId: searchParams.get("serviceId") ?? undefined,
     customerId: searchParams.get("customerId") ?? undefined,
+  };
+}
+
+function asListNotificationJobsInput(
+  searchParams: URLSearchParams,
+  organizationId: string,
+): {
+  organizationId: string;
+  status?: "pending" | "processing" | "succeeded" | "failed";
+  deliveryChannel?: NotificationChannel;
+  eventType?: "booking_created" | "booking_cancelled" | "booking_rescheduled";
+  limit?: number;
+} {
+  const status = searchParams.get("status");
+
+  if (
+    status !== null &&
+    status !== "pending" &&
+    status !== "processing" &&
+    status !== "succeeded" &&
+    status !== "failed"
+  ) {
+    throw new ValidationError("status is invalid.");
+  }
+
+  const deliveryChannel = searchParams.get("deliveryChannel");
+
+  if (
+    deliveryChannel !== null &&
+    deliveryChannel !== "whatsapp" &&
+    deliveryChannel !== "sms" &&
+    deliveryChannel !== "email" &&
+    deliveryChannel !== "push" &&
+    deliveryChannel !== "voice"
+  ) {
+    throw new ValidationError("deliveryChannel is invalid.");
+  }
+
+  const eventType = searchParams.get("eventType");
+
+  if (
+    eventType !== null &&
+    eventType !== "booking_created" &&
+    eventType !== "booking_cancelled" &&
+    eventType !== "booking_rescheduled"
+  ) {
+    throw new ValidationError("eventType is invalid.");
+  }
+
+  const limitText = searchParams.get("limit");
+  let limit: number | undefined;
+
+  if (limitText !== null) {
+    const parsedLimit = Number.parseInt(limitText, 10);
+
+    if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
+      throw new ValidationError("limit must be a positive integer.");
+    }
+
+    limit = parsedLimit;
+  }
+
+  return {
+    organizationId,
+    status: status ?? undefined,
+    deliveryChannel: deliveryChannel ?? undefined,
+    eventType: eventType ?? undefined,
+    limit,
   };
 }
 
@@ -750,6 +843,25 @@ function matchBookingAction(
     organizationId: segments[1] ?? "",
     bookingId: segments[3] ?? "",
     action: segments[4] ?? "",
+  };
+}
+
+function matchOrganizationNotificationJobPath(
+  pathname: string,
+): { organizationId: string; notificationJobId: string } | null {
+  const segments = pathname.split("/").filter(Boolean);
+
+  if (
+    segments.length !== 4 ||
+    segments[0] !== "organizations" ||
+    segments[2] !== "notification-jobs"
+  ) {
+    return null;
+  }
+
+  return {
+    organizationId: segments[1] ?? "",
+    notificationJobId: segments[3] ?? "",
   };
 }
 

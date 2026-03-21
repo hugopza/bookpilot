@@ -15,6 +15,8 @@ import type {
   NotificationDeliveryStatus,
   NotificationJob,
   NotificationJobAttempt,
+  NotificationJobLatestDeliveryStatus,
+  NotificationJobWithLatestDeliveryStatus,
   OrganizationNotificationChannelConfiguration,
   Organization,
   Service,
@@ -28,6 +30,7 @@ import type {
   BookingRepository,
   ConfigurationRepository,
   NotificationFeedbackRepository,
+  NotificationObservabilityRepository,
   NotificationProcessingRepository,
 } from "../repositories";
 import { overlaps } from "../utils/date-time";
@@ -53,7 +56,8 @@ export class InMemoryBookingCoreRepository
     BookingMutationStore,
     ConfigurationRepository,
     NotificationProcessingRepository,
-    NotificationFeedbackRepository
+    NotificationFeedbackRepository,
+    NotificationObservabilityRepository
 {
   private readonly organizations = new Map<string, Organization>();
   private readonly services = new Map<string, Service>();
@@ -861,6 +865,96 @@ export class InMemoryBookingCoreRepository
       .sort((left, right) => left.attemptNumber - right.attemptNumber);
   }
 
+  async listOrganizationNotificationJobsWithLatestDeliveryStatus(input: {
+    organizationId: string;
+    status?: NotificationJob["status"];
+    deliveryChannel?: NotificationChannel;
+    eventType?: NotificationJob["eventType"];
+    limit: number;
+  }): Promise<NotificationJobWithLatestDeliveryStatus[]> {
+    return [...this.notificationJobs.values()]
+      .filter((notificationJob) => {
+        if (notificationJob.organizationId !== input.organizationId) {
+          return false;
+        }
+
+        if (input.status && notificationJob.status !== input.status) {
+          return false;
+        }
+
+        if (
+          input.deliveryChannel &&
+          notificationJob.deliveryChannel !== input.deliveryChannel
+        ) {
+          return false;
+        }
+
+        if (input.eventType && notificationJob.eventType !== input.eventType) {
+          return false;
+        }
+
+        return true;
+      })
+      .sort(
+        (left, right) =>
+          right.createdAt.getTime() - left.createdAt.getTime() ||
+          right.id.localeCompare(left.id),
+      )
+      .slice(0, input.limit)
+      .map((notificationJob) => ({
+        job: notificationJob,
+        latestDeliveryStatus: this.buildLatestDeliveryStatus(notificationJob.id),
+      }));
+  }
+
+  async getOrganizationNotificationJobWithLatestDeliveryStatus(input: {
+    organizationId: string;
+    notificationJobId: string;
+  }): Promise<NotificationJobWithLatestDeliveryStatus | null> {
+    const notificationJob = this.notificationJobs.get(input.notificationJobId);
+
+    if (!notificationJob || notificationJob.organizationId !== input.organizationId) {
+      return null;
+    }
+
+    return {
+      job: notificationJob,
+      latestDeliveryStatus: this.buildLatestDeliveryStatus(notificationJob.id),
+    };
+  }
+
+  async listOrganizationNotificationJobAttempts(input: {
+    organizationId: string;
+    notificationJobId: string;
+  }): Promise<NotificationJobAttempt[]> {
+    const notificationJob = this.notificationJobs.get(input.notificationJobId);
+
+    if (!notificationJob || notificationJob.organizationId !== input.organizationId) {
+      return [];
+    }
+
+    return [...this.notificationJobAttempts.values()]
+      .filter((attempt) => attempt.notificationJobId === input.notificationJobId)
+      .sort((left, right) => left.attemptNumber - right.attemptNumber);
+  }
+
+  async listOrganizationNotificationDeliveryFeedbackEvents(input: {
+    organizationId: string;
+    notificationJobId: string;
+  }): Promise<NotificationDeliveryFeedbackEvent[]> {
+    return [...this.notificationDeliveryFeedbackEvents.values()]
+      .filter(
+        (event) =>
+          event.organizationId === input.organizationId &&
+          event.notificationJobId === input.notificationJobId,
+      )
+      .sort(
+        (left, right) =>
+          left.occurredAt.getTime() - right.occurredAt.getTime() ||
+          left.receivedAt.getTime() - right.receivedAt.getTime(),
+      );
+  }
+
   async reconcileNotificationDeliveryFeedback(input: {
     providerKey: string;
     providerEventId: string;
@@ -988,6 +1082,45 @@ export class InMemoryBookingCoreRepository
   private toFeedbackEventKey(providerKey: string, providerEventId: string): string {
     return `${providerKey}:${providerEventId}`;
   }
+
+  private buildLatestDeliveryStatus(
+    notificationJobId: string,
+  ): NotificationJobLatestDeliveryStatus {
+    const latestAttempt =
+      [...this.notificationJobAttempts.values()]
+        .filter(
+          (attempt) =>
+            attempt.notificationJobId === notificationJobId &&
+            attempt.deliveryStatus !== null &&
+            attempt.deliveryStatusUpdatedAt !== null,
+        )
+        .sort(
+          (left, right) =>
+            right.deliveryStatusUpdatedAt!.getTime() -
+              left.deliveryStatusUpdatedAt!.getTime() ||
+            right.attemptNumber - left.attemptNumber,
+        )[0] ?? null;
+
+    if (!latestAttempt) {
+      return {
+        notificationJobAttemptId: null,
+        providerMessageId: null,
+        normalizedStatus: null,
+        providerStatus: null,
+        occurredAt: null,
+      };
+    }
+
+    return {
+      notificationJobAttemptId: latestAttempt.id,
+      providerMessageId: latestAttempt.providerMessageId,
+      normalizedStatus: latestAttempt.deliveryStatus,
+      providerStatus: readProviderStatusFromMetadata(
+        latestAttempt.deliveryStatusMetadata,
+      ),
+      occurredAt: latestAttempt.deliveryStatusUpdatedAt,
+    };
+  }
 }
 
 function readProviderDelivery(payload: Record<string, unknown>): {
@@ -1027,6 +1160,14 @@ function readObjectRecord(
   }
 
   return value as Record<string, unknown>;
+}
+
+function readProviderStatusFromMetadata(
+  metadata: Record<string, unknown>,
+): string | null {
+  const value = metadata.providerStatus;
+
+  return typeof value === "string" ? value : null;
 }
 
 export function asAvailabilityRepository(

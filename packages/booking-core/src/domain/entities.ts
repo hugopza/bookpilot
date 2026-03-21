@@ -184,6 +184,19 @@ export interface NotificationDeliveryFeedbackReconciliationResult {
   updatedAttempt: boolean;
 }
 
+export interface NotificationJobLatestDeliveryStatus {
+  notificationJobAttemptId: string | null;
+  providerMessageId: string | null;
+  normalizedStatus: NotificationDeliveryStatus | null;
+  providerStatus: string | null;
+  occurredAt: Date | null;
+}
+
+export interface NotificationJobWithLatestDeliveryStatus {
+  job: NotificationJob;
+  latestDeliveryStatus: NotificationJobLatestDeliveryStatus;
+}
+
 export interface ClaimedNotificationJob {
   job: NotificationJob;
   attempt: NotificationJobAttempt;

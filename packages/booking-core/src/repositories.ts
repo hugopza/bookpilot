@@ -9,10 +9,12 @@ import type {
   CustomerContactInput,
   DateRange,
   NotificationChannel,
+  NotificationDeliveryFeedbackEvent,
   NotificationDeliveryFeedbackReconciliationResult,
   NotificationDeliveryStatus,
   NotificationJob,
   NotificationJobAttempt,
+  NotificationJobWithLatestDeliveryStatus,
   OrganizationNotificationChannelConfiguration,
   Organization,
   Service,
@@ -152,6 +154,29 @@ export interface NotificationFeedbackRepository {
     receivedAt: Date;
     payload: Record<string, unknown>;
   }): Promise<NotificationDeliveryFeedbackReconciliationResult>;
+}
+
+export interface NotificationObservabilityRepository
+  extends Pick<AvailabilityRepository, "getOrganization"> {
+  listOrganizationNotificationJobsWithLatestDeliveryStatus(input: {
+    organizationId: string;
+    status?: NotificationJob["status"];
+    deliveryChannel?: NotificationChannel;
+    eventType?: NotificationJob["eventType"];
+    limit: number;
+  }): Promise<NotificationJobWithLatestDeliveryStatus[]>;
+  getOrganizationNotificationJobWithLatestDeliveryStatus(input: {
+    organizationId: string;
+    notificationJobId: string;
+  }): Promise<NotificationJobWithLatestDeliveryStatus | null>;
+  listOrganizationNotificationJobAttempts(input: {
+    organizationId: string;
+    notificationJobId: string;
+  }): Promise<NotificationJobAttempt[]>;
+  listOrganizationNotificationDeliveryFeedbackEvents(input: {
+    organizationId: string;
+    notificationJobId: string;
+  }): Promise<NotificationDeliveryFeedbackEvent[]>;
 }
 
 export interface ConfigurationRepository
