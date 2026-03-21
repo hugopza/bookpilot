@@ -528,6 +528,27 @@ An **internal API access token** represents an internal operator credential used
 
 ---
 
+### Internal API token audit event
+
+An **internal API token audit event** is an immutable operational record of token lifecycle actions such as issue, rotate, and revoke.
+
+### Typical attributes
+
+- event type
+- actor token id, role, and optional organization scope
+- target token id, role, and optional organization scope
+- occurred-at timestamp
+- non-sensitive metadata relevant for operations
+
+### Invariants
+
+- audit events are append-only in platform behavior
+- audit events must not contain raw token material
+- lifecycle actions should record audit events atomically with token-state changes when practical
+- audit state supports traceability and operations and does not redefine booking-domain truth
+
+---
+
 ## Key relationships summary
 
 A simplified conceptual relationship map is:

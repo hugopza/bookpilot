@@ -28,6 +28,7 @@ import {
   InternalApiUnauthorizedError,
   InternalApiValidationError,
   type InternalApiRole,
+  type InternalApiTokenAuditEventType,
   PostgresInternalApiAuthRepository,
   createInternalApiAuthService,
   createInternalApiTokenLifecycleService,
@@ -115,6 +116,15 @@ const server = createServer(async (request, response) => {
       const result = await internalApiTokenLifecycleService.list({
         actor: principal,
         ...asListInternalApiTokensInput(url.searchParams),
+      });
+      writeJson(response, 200, result);
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/internal/auth/audit-events") {
+      const result = await internalApiTokenLifecycleService.listAuditEvents({
+        actor: principal,
+        ...asListInternalApiTokenAuditEventsInput(url.searchParams),
       });
       writeJson(response, 200, result);
       return;
@@ -734,6 +744,46 @@ function asListInternalApiTokensInput(
     organizationId: searchParams.get("organizationId") ?? undefined,
     role: role ?? undefined,
     active,
+    limit,
+  };
+}
+
+function asListInternalApiTokenAuditEventsInput(
+  searchParams: URLSearchParams,
+): {
+  organizationId?: string;
+  targetTokenId?: string;
+  eventType?: InternalApiTokenAuditEventType;
+  limit?: number;
+} {
+  const eventType = searchParams.get("eventType");
+
+  if (
+    eventType !== null &&
+    eventType !== "token_issued" &&
+    eventType !== "token_rotated" &&
+    eventType !== "token_revoked"
+  ) {
+    throw new ValidationError("eventType is invalid.");
+  }
+
+  const limitText = searchParams.get("limit");
+  let limit: number | undefined;
+
+  if (limitText !== null) {
+    const parsedLimit = Number.parseInt(limitText, 10);
+
+    if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
+      throw new ValidationError("limit must be a positive integer.");
+    }
+
+    limit = parsedLimit;
+  }
+
+  return {
+    organizationId: searchParams.get("organizationId") ?? undefined,
+    targetTokenId: searchParams.get("targetTokenId") ?? undefined,
+    eventType: eventType ?? undefined,
     limit,
   };
 }

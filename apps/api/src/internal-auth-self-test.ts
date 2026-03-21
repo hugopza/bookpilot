@@ -11,6 +11,7 @@ import {
   createInternalApiTokenLifecycleService,
   type InternalApiPrincipal,
   type InternalApiRole,
+  type InternalApiTokenAuditEventRecord,
   type InternalApiTokenAuditRecord,
 } from "./internal-auth";
 
@@ -186,6 +187,20 @@ async function runLifecycleScenario(): Promise<void> {
     active: false,
   });
   assert.equal(listedAfterRevocation.length, 2);
+
+  const auditEvents = await lifecycleService.listAuditEvents({
+    actor: organizationActor,
+  });
+  assert.equal(auditEvents.length, 3);
+  assert.equal(auditEvents[0]?.eventType, "token_revoked");
+  assert.equal(auditEvents[1]?.eventType, "token_rotated");
+  assert.equal(auditEvents[2]?.eventType, "token_issued");
+  assert.equal(auditEvents[0]?.targetTokenId, rotated.tokenRecord.id);
+  assert.equal(auditEvents[1]?.targetTokenId, rotated.tokenRecord.id);
+  assert.equal(
+    auditEvents[1]?.metadata.replacedTokenId,
+    issued.tokenRecord.id,
+  );
 }
 
 async function runCrossTenantLifecycleScenario(): Promise<void> {
@@ -273,6 +288,15 @@ async function runCrossTenantLifecycleScenario(): Promise<void> {
       }),
     InternalApiValidationError,
   );
+
+  await assert.rejects(
+    () =>
+      lifecycleService.listAuditEvents({
+        actor: organizationActor,
+        organizationId: OTHER_ORGANIZATION_ID,
+      }),
+    InternalApiForbiddenError,
+  );
 }
 
 function asIncomingMessage(
@@ -315,6 +339,7 @@ class InMemoryInternalApiTokenRepository {
     }
   >();
   private readonly markedTokenIds: string[] = [];
+  private readonly auditEvents: InternalApiTokenAuditEventRecord[] = [];
 
   async seedToken(input: {
     role: InternalApiRole;
@@ -379,8 +404,10 @@ class InMemoryInternalApiTokenRepository {
     organizationId: string | null;
     description: string | null;
     expiresAt: Date | null;
+    actor: InternalApiPrincipal;
+    occurredAt: Date;
   }): Promise<InternalApiTokenAuditRecord> {
-    const now = new Date();
+    const now = input.occurredAt;
     const record = {
       id: randomUUID(),
       tokenHash: input.tokenHash,
@@ -396,6 +423,18 @@ class InMemoryInternalApiTokenRepository {
 
     this.tokenByHash.set(record.tokenHash, record);
     this.tokenById.set(record.id, record);
+    this.auditEvents.push(
+      asAuditEventRecord({
+        eventType: "token_issued",
+        actor: input.actor,
+        targetToken: record,
+        occurredAt: input.occurredAt,
+        metadata: {
+          description: record.description,
+          expiresAt: record.expiresAt?.toISOString() ?? null,
+        },
+      }),
+    );
     return asAuditRecord(record);
   }
 
@@ -431,9 +470,38 @@ class InMemoryInternalApiTokenRepository {
       .map(asAuditRecord);
   }
 
+  async listAuditEvents(input: {
+    organizationId?: string;
+    targetTokenId?: string;
+    eventType?: "token_issued" | "token_rotated" | "token_revoked";
+    limit: number;
+  }): Promise<InternalApiTokenAuditEventRecord[]> {
+    return this.auditEvents
+      .filter((event) =>
+        input.organizationId === undefined
+          ? true
+          : event.targetOrganizationId === input.organizationId,
+      )
+      .filter((event) =>
+        input.targetTokenId === undefined
+          ? true
+          : event.targetTokenId === input.targetTokenId,
+      )
+      .filter((event) =>
+        input.eventType === undefined ? true : event.eventType === input.eventType,
+      )
+      .sort(
+        (left, right) =>
+          right.occurredAt.getTime() - left.occurredAt.getTime() ||
+          right.id.localeCompare(left.id),
+      )
+      .slice(0, input.limit);
+  }
+
   async revokeToken(input: {
     tokenId: string;
     revokedAt: Date;
+    actor: InternalApiPrincipal;
   }): Promise<InternalApiTokenAuditRecord | null> {
     const record = this.tokenById.get(input.tokenId);
 
@@ -443,6 +511,17 @@ class InMemoryInternalApiTokenRepository {
 
     record.active = false;
     record.updatedAt = input.revokedAt;
+    this.auditEvents.push(
+      asAuditEventRecord({
+        eventType: "token_revoked",
+        actor: input.actor,
+        targetToken: record,
+        occurredAt: input.revokedAt,
+        metadata: {
+          active: record.active,
+        },
+      }),
+    );
     return asAuditRecord(record);
   }
 
@@ -452,6 +531,7 @@ class InMemoryInternalApiTokenRepository {
     description: string | null;
     expiresAt: Date | null;
     now: Date;
+    actor: InternalApiPrincipal;
   }): Promise<{
     revokedToken: InternalApiTokenAuditRecord;
     newToken: InternalApiTokenAuditRecord;
@@ -486,6 +566,21 @@ class InMemoryInternalApiTokenRepository {
 
     this.tokenByHash.set(rotated.tokenHash, rotated);
     this.tokenById.set(rotated.id, rotated);
+    this.auditEvents.push(
+      asAuditEventRecord({
+        eventType: "token_rotated",
+        actor: input.actor,
+        targetToken: rotated,
+        occurredAt: input.now,
+        metadata: {
+          replacedTokenId: existing.id,
+          replacedTokenRole: existing.role,
+          replacedTokenOrganizationId: existing.organizationId,
+          description: rotated.description,
+          expiresAt: rotated.expiresAt?.toISOString() ?? null,
+        },
+      }),
+    );
 
     return {
       revokedToken: asAuditRecord(existing),
@@ -519,6 +614,31 @@ function asAuditRecord(record: {
     lastUsedAt: record.lastUsedAt,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+  };
+}
+
+function asAuditEventRecord(input: {
+  eventType: "token_issued" | "token_rotated" | "token_revoked";
+  actor: InternalApiPrincipal;
+  targetToken: {
+    id: string;
+    role: InternalApiRole;
+    organizationId: string | null;
+  };
+  occurredAt: Date;
+  metadata: Record<string, unknown>;
+}): InternalApiTokenAuditEventRecord {
+  return {
+    id: randomUUID(),
+    eventType: input.eventType,
+    actorTokenId: input.actor.tokenId,
+    actorRole: input.actor.role,
+    actorOrganizationId: input.actor.organizationId,
+    targetTokenId: input.targetToken.id,
+    targetRole: input.targetToken.role,
+    targetOrganizationId: input.targetToken.organizationId,
+    occurredAt: input.occurredAt,
+    metadata: input.metadata,
   };
 }
 

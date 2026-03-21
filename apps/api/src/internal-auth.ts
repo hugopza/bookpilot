@@ -67,6 +67,24 @@ export interface InternalApiTokenAuditRecord {
   updatedAt: Date;
 }
 
+export type InternalApiTokenAuditEventType =
+  | "token_issued"
+  | "token_rotated"
+  | "token_revoked";
+
+export interface InternalApiTokenAuditEventRecord {
+  id: string;
+  eventType: InternalApiTokenAuditEventType;
+  actorTokenId: string;
+  actorRole: InternalApiRole;
+  actorOrganizationId: string | null;
+  targetTokenId: string;
+  targetRole: InternalApiRole;
+  targetOrganizationId: string | null;
+  occurredAt: Date;
+  metadata: Record<string, unknown>;
+}
+
 interface InternalApiAuthRepository {
   getActiveTokenByHash(input: {
     tokenHash: string;
@@ -82,6 +100,8 @@ interface InternalApiTokenLifecycleRepository {
     organizationId: string | null;
     description: string | null;
     expiresAt: Date | null;
+    actor: InternalApiPrincipal;
+    occurredAt: Date;
   }): Promise<InternalApiTokenAuditRecord>;
   getTokenById(tokenId: string): Promise<InternalApiTokenAuditRecord | null>;
   listTokens(input: {
@@ -93,6 +113,7 @@ interface InternalApiTokenLifecycleRepository {
   revokeToken(input: {
     tokenId: string;
     revokedAt: Date;
+    actor: InternalApiPrincipal;
   }): Promise<InternalApiTokenAuditRecord | null>;
   rotateToken(input: {
     tokenId: string;
@@ -100,10 +121,17 @@ interface InternalApiTokenLifecycleRepository {
     description: string | null;
     expiresAt: Date | null;
     now: Date;
+    actor: InternalApiPrincipal;
   }): Promise<{
     revokedToken: InternalApiTokenAuditRecord;
     newToken: InternalApiTokenAuditRecord;
   } | null>;
+  listAuditEvents(input: {
+    organizationId?: string;
+    targetTokenId?: string;
+    eventType?: InternalApiTokenAuditEventType;
+    limit: number;
+  }): Promise<InternalApiTokenAuditEventRecord[]>;
 }
 
 interface InternalApiTokenRow {
@@ -116,6 +144,19 @@ interface InternalApiTokenRow {
   last_used_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+interface InternalApiTokenAuditEventRow {
+  id: string;
+  event_type: InternalApiTokenAuditEventType;
+  actor_token_id: string;
+  actor_role: InternalApiRole;
+  actor_organization_id: string | null;
+  target_token_id: string;
+  target_role: InternalApiRole;
+  target_organization_id: string | null;
+  occurred_at: Date | string;
+  metadata: Record<string, unknown> | string;
 }
 
 export class PostgresInternalApiAuthRepository
@@ -179,39 +220,91 @@ export class PostgresInternalApiAuthRepository
     organizationId: string | null;
     description: string | null;
     expiresAt: Date | null;
+    actor: InternalApiPrincipal;
+    occurredAt: Date;
   }): Promise<InternalApiTokenAuditRecord> {
-    const result = await this.pool.query<InternalApiTokenRow>(
-      `
-        insert into internal_api_tokens (
-          token_hash,
-          role,
-          organization_id,
-          description,
-          active,
-          expires_at
-        )
-        values ($1, $2, $3, $4, true, $5::timestamptz)
-        returning
-          id,
-          role,
-          organization_id,
-          description,
-          active,
-          expires_at,
-          last_used_at,
-          created_at,
-          updated_at
-      `,
-      [
-        input.tokenHash,
-        input.role,
-        input.organizationId,
-        input.description,
-        input.expiresAt?.toISOString() ?? null,
-      ],
-    );
+    const client = await this.pool.connect();
 
-    return mapInternalApiTokenAuditRecord(result.rows[0]);
+    try {
+      await client.query("begin");
+
+      const result = await client.query<InternalApiTokenRow>(
+        `
+          insert into internal_api_tokens (
+            token_hash,
+            role,
+            organization_id,
+            description,
+            active,
+            expires_at
+          )
+          values ($1, $2, $3, $4, true, $5::timestamptz)
+          returning
+            id,
+            role,
+            organization_id,
+            description,
+            active,
+            expires_at,
+            last_used_at,
+            created_at,
+            updated_at
+        `,
+        [
+          input.tokenHash,
+          input.role,
+          input.organizationId,
+          input.description,
+          input.expiresAt?.toISOString() ?? null,
+        ],
+      );
+      const createdToken = result.rows[0];
+
+      if (!createdToken) {
+        throw new InternalApiValidationError("Token issuance failed.");
+      }
+
+      await client.query(
+        `
+          insert into internal_api_token_audit_events (
+            event_type,
+            actor_token_id,
+            actor_role,
+            actor_organization_id,
+            target_token_id,
+            target_role,
+            target_organization_id,
+            occurred_at,
+            metadata
+          )
+          values ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb)
+        `,
+        [
+          "token_issued",
+          input.actor.tokenId,
+          input.actor.role,
+          input.actor.organizationId,
+          createdToken.id,
+          createdToken.role,
+          createdToken.organization_id,
+          input.occurredAt.toISOString(),
+          JSON.stringify({
+            description: createdToken.description,
+            expiresAt: createdToken.expires_at
+              ? toDate(createdToken.expires_at).toISOString()
+              : null,
+          }),
+        ],
+      );
+
+      await client.query("commit");
+      return mapInternalApiTokenAuditRecord(createdToken);
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async getTokenById(tokenId: string): Promise<InternalApiTokenAuditRecord | null> {
@@ -273,32 +366,118 @@ export class PostgresInternalApiAuthRepository
     return result.rows.map(mapInternalApiTokenAuditRecord);
   }
 
+  async listAuditEvents(input: {
+    organizationId?: string;
+    targetTokenId?: string;
+    eventType?: InternalApiTokenAuditEventType;
+    limit: number;
+  }): Promise<InternalApiTokenAuditEventRecord[]> {
+    const result = await this.pool.query<InternalApiTokenAuditEventRow>(
+      `
+        select
+          id,
+          event_type,
+          actor_token_id,
+          actor_role,
+          actor_organization_id,
+          target_token_id,
+          target_role,
+          target_organization_id,
+          occurred_at,
+          metadata
+        from internal_api_token_audit_events
+        where ($1::uuid is null or target_organization_id = $1::uuid)
+          and ($2::uuid is null or target_token_id = $2::uuid)
+          and ($3::text is null or event_type = $3::text)
+        order by occurred_at desc, id desc
+        limit $4
+      `,
+      [
+        input.organizationId ?? null,
+        input.targetTokenId ?? null,
+        input.eventType ?? null,
+        input.limit,
+      ],
+    );
+
+    return result.rows.map(mapInternalApiTokenAuditEventRecord);
+  }
+
   async revokeToken(input: {
     tokenId: string;
     revokedAt: Date;
+    actor: InternalApiPrincipal;
   }): Promise<InternalApiTokenAuditRecord | null> {
-    const result = await this.pool.query<InternalApiTokenRow>(
-      `
-        update internal_api_tokens
-        set
-          active = false,
-          updated_at = $2::timestamptz
-        where id = $1
-        returning
-          id,
-          role,
-          organization_id,
-          description,
-          active,
-          expires_at,
-          last_used_at,
-          created_at,
-          updated_at
-      `,
-      [input.tokenId, input.revokedAt.toISOString()],
-    );
+    const client = await this.pool.connect();
 
-    return result.rows[0] ? mapInternalApiTokenAuditRecord(result.rows[0]) : null;
+    try {
+      await client.query("begin");
+
+      const result = await client.query<InternalApiTokenRow>(
+        `
+          update internal_api_tokens
+          set
+            active = false,
+            updated_at = $2::timestamptz
+          where id = $1
+          returning
+            id,
+            role,
+            organization_id,
+            description,
+            active,
+            expires_at,
+            last_used_at,
+            created_at,
+            updated_at
+        `,
+        [input.tokenId, input.revokedAt.toISOString()],
+      );
+      const revokedToken = result.rows[0];
+
+      if (!revokedToken) {
+        await client.query("rollback");
+        return null;
+      }
+
+      await client.query(
+        `
+          insert into internal_api_token_audit_events (
+            event_type,
+            actor_token_id,
+            actor_role,
+            actor_organization_id,
+            target_token_id,
+            target_role,
+            target_organization_id,
+            occurred_at,
+            metadata
+          )
+          values ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb)
+        `,
+        [
+          "token_revoked",
+          input.actor.tokenId,
+          input.actor.role,
+          input.actor.organizationId,
+          revokedToken.id,
+          revokedToken.role,
+          revokedToken.organization_id,
+          input.revokedAt.toISOString(),
+          JSON.stringify({
+            active: revokedToken.active,
+          }),
+        ],
+      );
+
+      await client.query("commit");
+      return mapInternalApiTokenAuditRecord(revokedToken);
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async rotateToken(input: {
@@ -307,6 +486,7 @@ export class PostgresInternalApiAuthRepository
     description: string | null;
     expiresAt: Date | null;
     now: Date;
+    actor: InternalApiPrincipal;
   }): Promise<{
     revokedToken: InternalApiTokenAuditRecord;
     newToken: InternalApiTokenAuditRecord;
@@ -403,12 +583,53 @@ export class PostgresInternalApiAuthRepository
           input.expiresAt?.toISOString() ?? null,
         ],
       );
+      const newToken = inserted.rows[0];
+
+      if (!newToken) {
+        throw new InternalApiValidationError("Token rotation failed.");
+      }
+
+      await client.query(
+        `
+          insert into internal_api_token_audit_events (
+            event_type,
+            actor_token_id,
+            actor_role,
+            actor_organization_id,
+            target_token_id,
+            target_role,
+            target_organization_id,
+            occurred_at,
+            metadata
+          )
+          values ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb)
+        `,
+        [
+          "token_rotated",
+          input.actor.tokenId,
+          input.actor.role,
+          input.actor.organizationId,
+          newToken.id,
+          newToken.role,
+          newToken.organization_id,
+          input.now.toISOString(),
+          JSON.stringify({
+            replacedTokenId: revokedToken.id,
+            replacedTokenRole: revokedToken.role,
+            replacedTokenOrganizationId: revokedToken.organization_id,
+            description: newToken.description,
+            expiresAt: newToken.expires_at
+              ? toDate(newToken.expires_at).toISOString()
+              : null,
+          }),
+        ],
+      );
 
       await client.query("commit");
 
       return {
         revokedToken: mapInternalApiTokenAuditRecord(revokedToken),
-        newToken: mapInternalApiTokenAuditRecord(inserted.rows[0]),
+        newToken: mapInternalApiTokenAuditRecord(newToken),
       };
     } catch (error) {
       await client.query("rollback");
@@ -503,6 +724,14 @@ export interface ListInternalApiTokensInput {
   limit?: number;
 }
 
+export interface ListInternalApiTokenAuditEventsInput {
+  actor: InternalApiPrincipal;
+  organizationId?: string;
+  targetTokenId?: string;
+  eventType?: InternalApiTokenAuditEventType;
+  limit?: number;
+}
+
 export interface IssueInternalApiTokenInput {
   actor: InternalApiPrincipal;
   role: InternalApiRole;
@@ -553,6 +782,38 @@ export function createInternalApiTokenLifecycleService(
       });
     },
 
+    async listAuditEvents(
+      input: ListInternalApiTokenAuditEventsInput,
+    ): Promise<InternalApiTokenAuditEventRecord[]> {
+      const limit = normalizeListLimit(input.limit);
+      const eventType = normalizeAuditEventType(input.eventType);
+      const scope = resolveAuditEventListScope(input.actor, input.organizationId);
+
+      if (
+        input.targetTokenId &&
+        input.actor.role === "organization_operator" &&
+        input.actor.organizationId
+      ) {
+        const targetToken = await repository.getTokenById(input.targetTokenId);
+
+        if (
+          targetToken &&
+          targetToken.organizationId !== input.actor.organizationId
+        ) {
+          throw new InternalApiForbiddenError(
+            "Token cannot list audit events for another organization token.",
+          );
+        }
+      }
+
+      return repository.listAuditEvents({
+        organizationId: scope.organizationId,
+        targetTokenId: input.targetTokenId,
+        eventType,
+        limit,
+      });
+    },
+
     async issue(input: IssueInternalApiTokenInput): Promise<IssueInternalApiTokenResult> {
       const role = normalizeInternalApiRole(input.role);
       const organizationId = normalizeOptionalString(input.organizationId);
@@ -569,6 +830,8 @@ export function createInternalApiTokenLifecycleService(
         organizationId,
         description,
         expiresAt,
+        actor: input.actor,
+        occurredAt: new Date(),
       });
 
       return {
@@ -612,6 +875,7 @@ export function createInternalApiTokenLifecycleService(
         description,
         expiresAt,
         now,
+        actor: input.actor,
       });
 
       if (!rotated) {
@@ -643,6 +907,7 @@ export function createInternalApiTokenLifecycleService(
       const revoked = await repository.revokeToken({
         tokenId: input.tokenId,
         revokedAt: new Date(),
+        actor: input.actor,
       });
 
       if (!revoked) {
@@ -844,6 +1109,45 @@ function resolveListScope(
   };
 }
 
+function normalizeAuditEventType(
+  eventType: InternalApiTokenAuditEventType | undefined,
+): InternalApiTokenAuditEventType | undefined {
+  if (eventType === undefined) {
+    return undefined;
+  }
+
+  if (
+    eventType === "token_issued" ||
+    eventType === "token_rotated" ||
+    eventType === "token_revoked"
+  ) {
+    return eventType;
+  }
+
+  throw new InternalApiValidationError("eventType is invalid.");
+}
+
+function resolveAuditEventListScope(
+  actor: InternalApiPrincipal,
+  organizationId: string | undefined,
+): { organizationId?: string } {
+  if (actor.role === "platform_admin") {
+    return {
+      organizationId,
+    };
+  }
+
+  if (organizationId && organizationId !== actor.organizationId) {
+    throw new InternalApiForbiddenError(
+      "Token cannot list audit events for another organization.",
+    );
+  }
+
+  return {
+    organizationId: actor.organizationId ?? undefined,
+  };
+}
+
 function mapInternalApiTokenAuditRecord(
   row: InternalApiTokenRow,
 ): InternalApiTokenAuditRecord {
@@ -860,8 +1164,33 @@ function mapInternalApiTokenAuditRecord(
   };
 }
 
+function mapInternalApiTokenAuditEventRecord(
+  row: InternalApiTokenAuditEventRow,
+): InternalApiTokenAuditEventRecord {
+  return {
+    id: row.id,
+    eventType: row.event_type,
+    actorTokenId: row.actor_token_id,
+    actorRole: row.actor_role,
+    actorOrganizationId: row.actor_organization_id,
+    targetTokenId: row.target_token_id,
+    targetRole: row.target_role,
+    targetOrganizationId: row.target_organization_id,
+    occurredAt: toDate(row.occurred_at),
+    metadata: toRecord(row.metadata),
+  };
+}
+
 function toDate(value: Date | string): Date {
   return value instanceof Date ? value : new Date(value);
+}
+
+function toRecord(value: Record<string, unknown> | string): Record<string, unknown> {
+  if (typeof value === "string") {
+    return JSON.parse(value) as Record<string, unknown>;
+  }
+
+  return value;
 }
 
 function generateInternalApiToken(): string {
