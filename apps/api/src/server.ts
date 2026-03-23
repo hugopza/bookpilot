@@ -77,9 +77,28 @@ const notificationDeliveryObservabilityService =
 const port = Number(process.env.PORT ?? "3001");
 const resendWebhookSecret = process.env.RESEND_WEBHOOK_SECRET ?? "";
 const resendWebhookBearerToken = process.env.RESEND_WEBHOOK_BEARER_TOKEN ?? "";
+const internalAdminAllowedOrigins = parseAllowedOrigins(
+  process.env.INTERNAL_ADMIN_ALLOWED_ORIGINS ?? "http://localhost:3000",
+);
 
 const server = createServer(async (request, response) => {
   try {
+    const corsOrigin = applyCorsHeaders(request, response, internalAdminAllowedOrigins);
+
+    if (request.method === "OPTIONS") {
+      if (!corsOrigin && readOriginHeader(request) !== null) {
+        writeJson(response, 403, {
+          error: "Origin is not allowed.",
+          code: "CORS_ORIGIN_FORBIDDEN",
+        });
+        return;
+      }
+
+      response.statusCode = 204;
+      response.end();
+      return;
+    }
+
     const url = getRequestUrl(request);
     const pathname = url.pathname;
 
@@ -111,6 +130,11 @@ const server = createServer(async (request, response) => {
     }
 
     const principal = await internalApiAuthService.authenticateRequest(request);
+
+    if (request.method === "GET" && pathname === "/internal/auth/me") {
+      writeJson(response, 200, principal);
+      return;
+    }
 
     if (request.method === "GET" && pathname === "/internal/auth/tokens") {
       const result = await internalApiTokenLifecycleService.list({
@@ -1068,6 +1092,55 @@ function readSingleHeader(
   }
 
   return Array.isArray(value) ? value[0] ?? null : value;
+}
+
+function parseAllowedOrigins(value: string): Set<string> {
+  const entries = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+
+  return new Set(entries);
+}
+
+function applyCorsHeaders(
+  request: IncomingMessage,
+  response: ServerResponse,
+  allowedOrigins: Set<string>,
+): string | null {
+  const origin = readOriginHeader(request);
+
+  if (!origin) {
+    return null;
+  }
+
+  if (!allowedOrigins.has(origin)) {
+    return null;
+  }
+
+  response.setHeader("access-control-allow-origin", origin);
+  response.setHeader("vary", "origin");
+  response.setHeader(
+    "access-control-allow-methods",
+    "GET, POST, PUT, OPTIONS",
+  );
+  response.setHeader(
+    "access-control-allow-headers",
+    "authorization, content-type",
+  );
+  response.setHeader("access-control-max-age", "600");
+
+  return origin;
+}
+
+function readOriginHeader(request: IncomingMessage): string | null {
+  const origin = readSingleHeader(request, "origin");
+
+  if (!origin) {
+    return null;
+  }
+
+  return origin;
 }
 
 function matchOrganizationResource(

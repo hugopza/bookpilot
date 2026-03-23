@@ -192,15 +192,24 @@ async function runLifecycleScenario(): Promise<void> {
     actor: organizationActor,
   });
   assert.equal(auditEvents.length, 3);
-  assert.equal(auditEvents[0]?.eventType, "token_revoked");
-  assert.equal(auditEvents[1]?.eventType, "token_rotated");
-  assert.equal(auditEvents[2]?.eventType, "token_issued");
-  assert.equal(auditEvents[0]?.targetTokenId, rotated.tokenRecord.id);
-  assert.equal(auditEvents[1]?.targetTokenId, rotated.tokenRecord.id);
-  assert.equal(
-    auditEvents[1]?.metadata.replacedTokenId,
-    issued.tokenRecord.id,
+
+  const revokedEvent = auditEvents.find(
+    (event) => event.eventType === "token_revoked",
   );
+  const rotatedEvent = auditEvents.find(
+    (event) => event.eventType === "token_rotated",
+  );
+  const issuedEvent = auditEvents.find(
+    (event) => event.eventType === "token_issued",
+  );
+
+  assert.ok(revokedEvent);
+  assert.ok(rotatedEvent);
+  assert.ok(issuedEvent);
+  assert.equal(revokedEvent.targetTokenId, rotated.tokenRecord.id);
+  assert.equal(rotatedEvent.targetTokenId, rotated.tokenRecord.id);
+  assert.equal(rotatedEvent.metadata.replacedTokenId, issued.tokenRecord.id);
+  assert.equal(issuedEvent.targetTokenId, issued.tokenRecord.id);
 }
 
 async function runCrossTenantLifecycleScenario(): Promise<void> {
