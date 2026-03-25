@@ -390,6 +390,30 @@ Token lifecycle management is an internal access-control workflow and must not a
 
 ---
 
+## Workflow: first platform-admin bootstrap token
+
+### Goal
+
+Allow a fresh environment to issue the first internal `platform_admin` token without manual SQL edits.
+
+### Canonical flow
+
+1. an internal operator runs the bootstrap command in a local/internal environment
+2. the platform verifies no internal API tokens exist yet
+3. the platform issues one `platform_admin` token in canonical Postgres state
+4. the raw token is shown once for secure storage
+5. subsequent token lifecycle actions use the normal authenticated internal auth endpoints
+
+### Local command
+
+`npm run bootstrap:platform-admin`
+
+### Important rule
+
+Bootstrap is a one-time initialization path. It must not behave like a permanent unauthenticated issuance path after the first token exists.
+
+---
+
 ## Workflow responsibilities by layer
 
 ### Channels

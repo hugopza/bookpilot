@@ -8,6 +8,7 @@ import {
   InternalApiUnauthorizedError,
   InternalApiValidationError,
   createInternalApiAuthService,
+  createInternalApiTokenBootstrapService,
   createInternalApiTokenLifecycleService,
   type InternalApiPrincipal,
   type InternalApiRole,
@@ -24,6 +25,7 @@ async function main(): Promise<void> {
   await runRequestHeaderScenario();
   await runLifecycleScenario();
   await runCrossTenantLifecycleScenario();
+  await runBootstrapLifecycleScenario();
   console.log("internal-auth self-test passed");
 }
 
@@ -308,6 +310,37 @@ async function runCrossTenantLifecycleScenario(): Promise<void> {
   );
 }
 
+async function runBootstrapLifecycleScenario(): Promise<void> {
+  const repository = new InMemoryInternalApiTokenRepository();
+  const bootstrapService = createInternalApiTokenBootstrapService(repository);
+
+  const bootstrapped = await bootstrapService.bootstrapFirstPlatformAdminToken({
+    description: "First platform token",
+  });
+
+  assert.equal(bootstrapped.token.startsWith("bpia_"), true);
+  assert.equal(bootstrapped.tokenRecord.role, "platform_admin");
+  assert.equal(bootstrapped.tokenRecord.organizationId, null);
+  assert.equal(bootstrapped.tokenRecord.active, true);
+
+  const auditEvents = await repository.listAuditEvents({
+    limit: 10,
+  });
+  const issuedEvent = auditEvents[0];
+  if (!issuedEvent) {
+    throw new Error("Expected bootstrap to record a token_issued audit event.");
+  }
+  assert.equal(issuedEvent.eventType, "token_issued");
+  assert.equal(issuedEvent.targetTokenId, bootstrapped.tokenRecord.id);
+  assert.equal(issuedEvent.targetRole, "platform_admin");
+  assert.equal(issuedEvent.metadata.bootstrap, true);
+
+  await assert.rejects(
+    () => bootstrapService.bootstrapFirstPlatformAdminToken(),
+    InternalApiValidationError,
+  );
+}
+
 function asIncomingMessage(
   headers: Record<string, string>,
 ): IncomingMessage {
@@ -444,6 +477,53 @@ class InMemoryInternalApiTokenRepository {
         },
       }),
     );
+    return asAuditRecord(record);
+  }
+
+  async bootstrapFirstPlatformAdminToken(input: {
+    tokenHash: string;
+    description: string | null;
+    expiresAt: Date | null;
+    occurredAt: Date;
+  }): Promise<InternalApiTokenAuditRecord | null> {
+    if (this.tokenById.size > 0) {
+      return null;
+    }
+
+    const record = {
+      id: randomUUID(),
+      tokenHash: input.tokenHash,
+      role: "platform_admin" as const,
+      organizationId: null,
+      description: input.description,
+      active: true,
+      expiresAt: input.expiresAt,
+      lastUsedAt: null,
+      createdAt: input.occurredAt,
+      updatedAt: input.occurredAt,
+    };
+
+    this.tokenByHash.set(record.tokenHash, record);
+    this.tokenById.set(record.id, record);
+    this.auditEvents.push(
+      asAuditEventRecord({
+        eventType: "token_issued",
+        actor: {
+          tokenId: record.id,
+          role: record.role,
+          organizationId: record.organizationId,
+          description: record.description,
+        },
+        targetToken: record,
+        occurredAt: input.occurredAt,
+        metadata: {
+          bootstrap: true,
+          description: record.description,
+          expiresAt: record.expiresAt?.toISOString() ?? null,
+        },
+      }),
+    );
+
     return asAuditRecord(record);
   }
 

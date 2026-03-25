@@ -134,6 +134,15 @@ interface InternalApiTokenLifecycleRepository {
   }): Promise<InternalApiTokenAuditEventRecord[]>;
 }
 
+interface InternalApiTokenBootstrapRepository {
+  bootstrapFirstPlatformAdminToken(input: {
+    tokenHash: string;
+    description: string | null;
+    expiresAt: Date | null;
+    occurredAt: Date;
+  }): Promise<InternalApiTokenAuditRecord | null>;
+}
+
 interface InternalApiTokenRow {
   id: string;
   role: InternalApiRole;
@@ -160,7 +169,10 @@ interface InternalApiTokenAuditEventRow {
 }
 
 export class PostgresInternalApiAuthRepository
-  implements InternalApiAuthRepository, InternalApiTokenLifecycleRepository
+  implements
+    InternalApiAuthRepository,
+    InternalApiTokenLifecycleRepository,
+    InternalApiTokenBootstrapRepository
 {
   constructor(private readonly pool: Pool) {}
 
@@ -638,6 +650,109 @@ export class PostgresInternalApiAuthRepository
       client.release();
     }
   }
+
+  async bootstrapFirstPlatformAdminToken(input: {
+    tokenHash: string;
+    description: string | null;
+    expiresAt: Date | null;
+    occurredAt: Date;
+  }): Promise<InternalApiTokenAuditRecord | null> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query("begin");
+      await client.query("lock table internal_api_tokens in share row exclusive mode");
+
+      const existingToken = await client.query<{ id: string }>(
+        `
+          select id
+          from internal_api_tokens
+          limit 1
+        `,
+      );
+
+      if (existingToken.rows[0]) {
+        await client.query("rollback");
+        return null;
+      }
+
+      const inserted = await client.query<InternalApiTokenRow>(
+        `
+          insert into internal_api_tokens (
+            token_hash,
+            role,
+            organization_id,
+            description,
+            active,
+            expires_at
+          )
+          values ($1, 'platform_admin', null, $2, true, $3::timestamptz)
+          returning
+            id,
+            role,
+            organization_id,
+            description,
+            active,
+            expires_at,
+            last_used_at,
+            created_at,
+            updated_at
+        `,
+        [
+          input.tokenHash,
+          input.description,
+          input.expiresAt?.toISOString() ?? null,
+        ],
+      );
+      const createdToken = inserted.rows[0];
+
+      if (!createdToken) {
+        throw new InternalApiValidationError("Bootstrap token creation failed.");
+      }
+
+      await client.query(
+        `
+          insert into internal_api_token_audit_events (
+            event_type,
+            actor_token_id,
+            actor_role,
+            actor_organization_id,
+            target_token_id,
+            target_role,
+            target_organization_id,
+            occurred_at,
+            metadata
+          )
+          values ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb)
+        `,
+        [
+          "token_issued",
+          createdToken.id,
+          createdToken.role,
+          createdToken.organization_id,
+          createdToken.id,
+          createdToken.role,
+          createdToken.organization_id,
+          input.occurredAt.toISOString(),
+          JSON.stringify({
+            bootstrap: true,
+            description: createdToken.description,
+            expiresAt: createdToken.expires_at
+              ? toDate(createdToken.expires_at).toISOString()
+              : null,
+          }),
+        ],
+      );
+
+      await client.query("commit");
+      return mapInternalApiTokenAuditRecord(createdToken);
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }
 
 export function createInternalApiAuthService(
@@ -763,8 +878,50 @@ export interface RevokeInternalApiTokenInput {
   tokenId: string;
 }
 
+export interface BootstrapFirstPlatformAdminTokenInput {
+  description?: string | null;
+  expiresAt?: string | null;
+}
+
+export interface BootstrapFirstPlatformAdminTokenResult {
+  token: string;
+  tokenRecord: InternalApiTokenAuditRecord;
+}
+
 const DEFAULT_TOKEN_LIST_LIMIT = 100;
 const MAX_TOKEN_LIST_LIMIT = 500;
+
+export function createInternalApiTokenBootstrapService(
+  repository: InternalApiTokenBootstrapRepository,
+) {
+  return {
+    async bootstrapFirstPlatformAdminToken(
+      input: BootstrapFirstPlatformAdminTokenInput = {},
+    ): Promise<BootstrapFirstPlatformAdminTokenResult> {
+      const description = normalizeOptionalString(input.description);
+      const expiresAt = parseOptionalFutureDateTime(input.expiresAt, "expiresAt");
+      const token = generateInternalApiToken();
+
+      const tokenRecord = await repository.bootstrapFirstPlatformAdminToken({
+        tokenHash: hashBearerToken(token),
+        description,
+        expiresAt,
+        occurredAt: new Date(),
+      });
+
+      if (!tokenRecord) {
+        throw new InternalApiValidationError(
+          "Bootstrap is only allowed when no internal API tokens exist.",
+        );
+      }
+
+      return {
+        token,
+        tokenRecord,
+      };
+    },
+  };
+}
 
 export function createInternalApiTokenLifecycleService(
   repository: InternalApiTokenLifecycleRepository,

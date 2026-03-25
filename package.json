@@ -9,12 +9,13 @@
   "scripts": {
     "build": "tsc -b",
     "build:admin": "npm run --workspace @bookpilot/admin build",
+    "bootstrap:platform-admin": "npm run build && node --env-file=apps/api/.env.local apps/api/dist/internal-auth-bootstrap.js",
     "typecheck": "tsc -b --pretty false",
     "test": "npm run build && node packages/booking-core/dist/self-test.js && node apps/api/dist/internal-auth-self-test.js && node apps/api/dist/notification-worker-self-test.js && node apps/api/dist/notification-feedback-self-test.js && node apps/api/dist/notification-observability-self-test.js",
     "dev:admin": "npm run --workspace @bookpilot/admin dev",
-    "start:api": "node apps/api/dist/server.js",
+    "start:api": "node --env-file=apps/api/.env.local apps/api/dist/server.js",
     "start:admin": "npm run --workspace @bookpilot/admin start",
-    "start:worker": "node apps/api/dist/notification-worker.js"
+    "start:worker": "node --env-file=apps/api/.env.local apps/api/dist/notification-worker.js"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
